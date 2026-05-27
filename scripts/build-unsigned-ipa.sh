@@ -3,7 +3,7 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
-CONFIGURATION="${CONFIGURATION:-Debug}"
+CONFIGURATION="${CONFIGURATION:-Release}"
 
 mkdir -p build
 exec > >(tee build/full-build.log) 2>&1
@@ -86,6 +86,12 @@ fi
 APP_PATH="$(find "build/DerivedData/Build/Products/${CONFIGURATION}-iphoneos" -maxdepth 1 -name "*.app" -type d -print -quit)"
 if [[ -z "${APP_PATH}" ]]; then
   echo "Could not find the built .app bundle."
+  exit 1
+fi
+
+if [[ ! -f "${APP_PATH}/main.jsbundle" ]]; then
+  echo "Built app is missing main.jsbundle. Refusing to package a sideload IPA that would crash on launch."
+  find "${APP_PATH}" -maxdepth 2 -type f | sort | tail -120
   exit 1
 fi
 
