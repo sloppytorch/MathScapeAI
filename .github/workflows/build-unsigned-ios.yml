@@ -38,6 +38,7 @@ jobs:
           name: unsigned-ipa-build-logs
           path: |
             build/full-build.log
+            build/pod-install.log
             build/xcodebuild-pods.log
             build/xcodebuild.log
           if-no-files-found: ignore

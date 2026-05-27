@@ -18,7 +18,15 @@ rm -rf "$HOME/Library/Developer/Xcode/DerivedData/MathScapeAI-"*
 (
   cd ios
   rm -rf Pods Podfile.lock
-  pod install --repo-update
+  set +e
+  pod install --repo-update --verbose 2>&1 | tee ../build/pod-install.log
+  POD_STATUS=${PIPESTATUS[0]}
+  set -e
+  if [[ "$POD_STATUS" -ne 0 ]]; then
+    echo "pod install failed with status ${POD_STATUS}. Last 240 log lines:"
+    tail -240 ../build/pod-install.log
+    exit "$POD_STATUS"
+  fi
 )
 
 WORKSPACE="$(find ios -maxdepth 2 -name "*.xcworkspace" -print -quit)"
