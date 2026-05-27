@@ -49,6 +49,19 @@ echo "Building unsigned iOS app with scheme: ${SCHEME}"
 rm -rf build/DerivedData unsigned-ipa MathScapeAI-unsigned.ipa
 mkdir -p build
 
+echo "Pre-seeding CocoaPods module maps for Swift app compilation..."
+PRODUCTS_DIR="$ROOT_DIR/build/DerivedData/Build/Products/Release-iphoneos"
+mkdir -p "$PRODUCTS_DIR"
+for POD_NAME in EXConstants Expo ExpoAsset ExpoDomWebView ExpoFileSystem ExpoFont ExpoImagePicker ExpoKeepAwake ExpoLogBox ExpoModulesCore RCTSwiftUI; do
+  SUPPORT_DIR="$ROOT_DIR/ios/Pods/Target Support Files/$POD_NAME"
+  DEST_DIR="$PRODUCTS_DIR/$POD_NAME"
+  if [[ -d "$SUPPORT_DIR" ]]; then
+    mkdir -p "$DEST_DIR"
+    cp "$SUPPORT_DIR"/*.modulemap "$DEST_DIR/" 2>/dev/null || true
+    cp "$SUPPORT_DIR"/*-umbrella.h "$DEST_DIR/" 2>/dev/null || true
+  fi
+done
+
 set +e
 CODE_SIGNING_ALLOWED=NO \
 CODE_SIGNING_REQUIRED=NO \
