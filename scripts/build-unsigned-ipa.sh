@@ -33,7 +33,7 @@ APP_DELEGATE="$(find ios -path "*/AppDelegate.swift" -print -quit)"
 if [[ -n "$APP_DELEGATE" ]]; then
   echo "Generated AppDelegate.swift before compatibility patch:"
   sed -n '1,220p' "$APP_DELEGATE"
-  ruby -0pi -e 'gsub(/^import React\n/, "import React_RCTAppDelegate\nimport React_RCTBundleURLProvider\n")' "$APP_DELEGATE"
+  ruby -0pi -e 'gsub(/^import React\n/, "")' "$APP_DELEGATE"
   echo "Generated AppDelegate.swift after compatibility patch:"
   sed -n '1,220p' "$APP_DELEGATE"
 fi
