@@ -1,0 +1,21 @@
+{
+  "expo": {
+    "name": "MathScape AI",
+    "slug": "mathscape-ai",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "userInterfaceStyle": "light",
+    "assetBundlePatterns": ["**/*"],
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "com.mathscape.ai",
+      "infoPlist": {
+        "NSCameraUsageDescription": "MathScape AI uses the camera to capture math problems.",
+        "NSPhotoLibraryUsageDescription": "MathScape AI uses your photo library to import math problem images."
+      }
+    },
+    "android": {
+      "package": "com.mathscape.ai"
+    }
+  }
+}

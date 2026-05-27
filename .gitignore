@@ -1,0 +1,8 @@
+node_modules/
+.expo/
+dist/
+build/
+unsigned-ipa/
+*.log
+*.ipa
+.DS_Store
