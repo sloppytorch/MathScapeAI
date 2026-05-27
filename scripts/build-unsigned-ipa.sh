@@ -40,7 +40,7 @@ SCHEMES_JSON="$(xcodebuild -list -json -workspace "$WORKSPACE")"
 echo "Available Xcode schemes:"
 echo "$SCHEMES_JSON" | ruby -rjson -e 'data = JSON.parse(STDIN.read); puts(data.dig("workspace", "schemes") || [])'
 
-SCHEME="$(echo "$SCHEMES_JSON" | ruby -rjson -e 'data = JSON.parse(STDIN.read); schemes = data.dig("workspace", "schemes") || []; puts schemes.find { |s| !s.start_with?("Pods-") }')"
+SCHEME="$(echo "$SCHEMES_JSON" | ruby -rjson -e 'data = JSON.parse(STDIN.read); schemes = data.dig("workspace", "schemes") || []; puts(schemes.find { |s| s == "MathScapeAI" } || schemes.find { |s| !s.start_with?("Pods-") && !%w[boost fmt glog hermes-engine].include?(s) })')"
 if [[ -z "${SCHEME}" ]]; then
   echo "Could not detect an Xcode scheme."
   exit 1
