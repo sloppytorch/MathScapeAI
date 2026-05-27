@@ -30,9 +30,9 @@ rm -rf "$HOME/Library/Developer/Xcode/DerivedData/MathScapeAI-"*
   fi
 )
 
-WORKSPACE="$(find ios -maxdepth 2 -name "*.xcworkspace" -print -quit)"
+WORKSPACE="$(find ios -maxdepth 1 -name "*.xcworkspace" -print -quit)"
 if [[ -z "${WORKSPACE}" ]]; then
-  echo "Could not find an iOS workspace."
+  echo "Could not find the CocoaPods iOS workspace."
   exit 1
 fi
 
