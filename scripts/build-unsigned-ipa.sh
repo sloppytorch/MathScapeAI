@@ -40,6 +40,9 @@ set +e
 CODE_SIGNING_ALLOWED=NO \
 CODE_SIGNING_REQUIRED=NO \
 CODE_SIGN_IDENTITY="" \
+CODE_SIGN_STYLE=Manual \
+DEVELOPMENT_TEAM="" \
+PROVISIONING_PROFILE_SPECIFIER="" \
 xcodebuild \
   -workspace "$WORKSPACE" \
   -scheme "$SCHEME" \
@@ -47,6 +50,12 @@ xcodebuild \
   -sdk iphoneos \
   -destination "generic/platform=iOS" \
   -derivedDataPath build/DerivedData \
+  CODE_SIGNING_ALLOWED=NO \
+  CODE_SIGNING_REQUIRED=NO \
+  CODE_SIGN_IDENTITY="" \
+  CODE_SIGN_STYLE=Manual \
+  DEVELOPMENT_TEAM="" \
+  PROVISIONING_PROFILE_SPECIFIER="" \
   build 2>&1 | tee build/xcodebuild.log
 XCODE_STATUS=${PIPESTATUS[0]}
 set -e
