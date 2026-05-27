@@ -27,19 +27,28 @@ jobs:
           ruby-version: ruby
 
       - name: Build unsigned IPA
+        id: build_ipa
+        continue-on-error: true
         run: bash scripts/build-unsigned-ipa.sh
 
-      - name: Upload Xcode log
+      - name: Upload build logs
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: xcodebuild-log
-          path: build/xcodebuild.log
+          name: unsigned-ipa-build-logs
+          path: |
+            build/full-build.log
+            build/xcodebuild.log
           if-no-files-found: ignore
 
       - name: Upload IPA artifact
+        if: steps.build_ipa.outcome == 'success'
         uses: actions/upload-artifact@v4
         with:
           name: MathScapeAI-unsigned-ipa
           path: MathScapeAI-unsigned.ipa
           if-no-files-found: error
+
+      - name: Fail if IPA build failed
+        if: steps.build_ipa.outcome != 'success'
+        run: exit 1
