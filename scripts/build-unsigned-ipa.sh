@@ -27,14 +27,41 @@ if [[ -z "${WORKSPACE}" ]]; then
   exit 1
 fi
 
-SCHEME="$(xcodebuild -list -json -workspace "$WORKSPACE" | ruby -rjson -e 'data = JSON.parse(STDIN.read); puts data.dig("workspace", "schemes")&.first')"
+SCHEMES_JSON="$(xcodebuild -list -json -workspace "$WORKSPACE")"
+echo "Available Xcode schemes:"
+echo "$SCHEMES_JSON" | ruby -rjson -e 'data = JSON.parse(STDIN.read); puts(data.dig("workspace", "schemes") || [])'
+
+SCHEME="$(echo "$SCHEMES_JSON" | ruby -rjson -e 'data = JSON.parse(STDIN.read); schemes = data.dig("workspace", "schemes") || []; puts schemes.find { |s| !s.start_with?("Pods-") }')"
 if [[ -z "${SCHEME}" ]]; then
   echo "Could not detect an Xcode scheme."
   exit 1
 fi
 
+PODS_SCHEME="$(echo "$SCHEMES_JSON" | ruby -rjson -e 'data = JSON.parse(STDIN.read); schemes = data.dig("workspace", "schemes") || []; puts schemes.find { |s| s == "Pods-MathScapeAI" || s.start_with?("Pods-") }')"
+
 echo "Building unsigned iOS app with scheme: ${SCHEME}"
 rm -rf build unsigned-ipa MathScapeAI-unsigned.ipa
+
+if [[ -n "${PODS_SCHEME}" ]]; then
+  echo "Building Pods scheme first: ${PODS_SCHEME}"
+  CODE_SIGNING_ALLOWED=NO \
+  CODE_SIGNING_REQUIRED=NO \
+  CODE_SIGN_IDENTITY="" \
+  CODE_SIGN_STYLE=Manual \
+  DEVELOPMENT_TEAM="" \
+  PROVISIONING_PROFILE_SPECIFIER="" \
+  xcodebuild \
+    -workspace "$WORKSPACE" \
+    -scheme "$PODS_SCHEME" \
+    -configuration Release \
+    -sdk iphoneos \
+    -destination "generic/platform=iOS" \
+    -derivedDataPath build/DerivedData \
+    -jobs 1 \
+    SWIFT_ENABLE_EXPLICIT_MODULES=NO \
+    COMPILER_INDEX_STORE_ENABLE=NO \
+    build 2>&1 | tee build/xcodebuild-pods.log
+fi
 
 set +e
 CODE_SIGNING_ALLOWED=NO \
@@ -50,12 +77,15 @@ xcodebuild \
   -sdk iphoneos \
   -destination "generic/platform=iOS" \
   -derivedDataPath build/DerivedData \
+  -jobs 1 \
   CODE_SIGNING_ALLOWED=NO \
   CODE_SIGNING_REQUIRED=NO \
   CODE_SIGN_IDENTITY="" \
   CODE_SIGN_STYLE=Manual \
   DEVELOPMENT_TEAM="" \
   PROVISIONING_PROFILE_SPECIFIER="" \
+  SWIFT_ENABLE_EXPLICIT_MODULES=NO \
+  COMPILER_INDEX_STORE_ENABLE=NO \
   build 2>&1 | tee build/xcodebuild.log
 XCODE_STATUS=${PIPESTATUS[0]}
 set -e
