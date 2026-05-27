@@ -45,66 +45,9 @@ if [[ -z "${SCHEME}" ]]; then
   exit 1
 fi
 
-PODS_SCHEME="$(echo "$SCHEMES_JSON" | ruby -rjson -e 'data = JSON.parse(STDIN.read); schemes = data.dig("workspace", "schemes") || []; puts schemes.find { |s| s == "Pods-MathScapeAI" || s.start_with?("Pods-") }')"
-
 echo "Building unsigned iOS app with scheme: ${SCHEME}"
 rm -rf build/DerivedData unsigned-ipa MathScapeAI-unsigned.ipa
 mkdir -p build
-
-echo "Building Pods workspace target first: Pods-MathScapeAI"
-set +e
-CODE_SIGNING_ALLOWED=NO \
-CODE_SIGNING_REQUIRED=NO \
-CODE_SIGN_IDENTITY="" \
-CODE_SIGN_STYLE=Manual \
-DEVELOPMENT_TEAM="" \
-PROVISIONING_PROFILE_SPECIFIER="" \
-xcodebuild \
-  -workspace "$WORKSPACE" \
-  -target "Pods-MathScapeAI" \
-  -configuration Release \
-  -sdk iphoneos \
-  -destination "generic/platform=iOS" \
-  -derivedDataPath build/DerivedData \
-  -jobs 1 \
-  CODE_SIGNING_ALLOWED=NO \
-  CODE_SIGNING_REQUIRED=NO \
-  CODE_SIGN_IDENTITY="" \
-  CODE_SIGN_STYLE=Manual \
-  DEVELOPMENT_TEAM="" \
-  PROVISIONING_PROFILE_SPECIFIER="" \
-  SWIFT_ENABLE_EXPLICIT_MODULES=NO \
-  COMPILER_INDEX_STORE_ENABLE=NO \
-  build 2>&1 | tee build/xcodebuild-pods.log
-PODS_BUILD_STATUS=${PIPESTATUS[0]}
-set -e
-
-if [[ "$PODS_BUILD_STATUS" -ne 0 ]]; then
-  echo "Pods workspace target build failed with status ${PODS_BUILD_STATUS}. Last 240 log lines:"
-  tail -240 build/xcodebuild-pods.log
-  exit "$PODS_BUILD_STATUS"
-fi
-
-if [[ -n "${PODS_SCHEME}" ]]; then
-  echo "Building Pods workspace scheme first: ${PODS_SCHEME}"
-  CODE_SIGNING_ALLOWED=NO \
-  CODE_SIGNING_REQUIRED=NO \
-  CODE_SIGN_IDENTITY="" \
-  CODE_SIGN_STYLE=Manual \
-  DEVELOPMENT_TEAM="" \
-  PROVISIONING_PROFILE_SPECIFIER="" \
-  xcodebuild \
-    -workspace "$WORKSPACE" \
-    -scheme "$PODS_SCHEME" \
-    -configuration Release \
-    -sdk iphoneos \
-    -destination "generic/platform=iOS" \
-    -derivedDataPath build/DerivedData \
-    -jobs 1 \
-    SWIFT_ENABLE_EXPLICIT_MODULES=NO \
-    COMPILER_INDEX_STORE_ENABLE=NO \
-    build 2>&1 | tee build/xcodebuild-pods.log
-fi
 
 set +e
 CODE_SIGNING_ALLOWED=NO \

@@ -4,6 +4,7 @@
     "slug": "mathscape-ai",
     "version": "1.0.0",
     "orientation": "portrait",
+    "newArchEnabled": false,
     "userInterfaceStyle": "light",
     "assetBundlePatterns": ["**/*"],
     "ios": {
