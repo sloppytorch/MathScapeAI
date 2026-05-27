@@ -13,6 +13,14 @@ npm ci
 echo "Generating native iOS project..."
 npx expo prebuild --platform ios --clean
 
+echo "Refreshing CocoaPods dependencies..."
+rm -rf "$HOME/Library/Developer/Xcode/DerivedData/MathScapeAI-"*
+(
+  cd ios
+  rm -rf Pods Podfile.lock
+  pod install --repo-update
+)
+
 WORKSPACE="$(find ios -maxdepth 2 -name "*.xcworkspace" -print -quit)"
 if [[ -z "${WORKSPACE}" ]]; then
   echo "Could not find an iOS workspace."
@@ -36,6 +44,7 @@ xcodebuild \
   -sdk iphoneos \
   -destination "generic/platform=iOS" \
   -derivedDataPath build/DerivedData \
+  -parallelizeTargets NO \
   CODE_SIGNING_ALLOWED=NO \
   CODE_SIGNING_REQUIRED=NO \
   CODE_SIGN_IDENTITY="" \
