@@ -11,7 +11,7 @@ echo "Installing JavaScript dependencies..."
 npm ci
 
 echo "Generating native iOS project..."
-npx expo prebuild --platform ios --clean
+npx expo prebuild --platform ios --clean --no-install
 
 echo "Refreshing CocoaPods dependencies..."
 rm -rf "$HOME/Library/Developer/Xcode/DerivedData/MathScapeAI-"*
