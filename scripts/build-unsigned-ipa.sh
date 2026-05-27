@@ -29,6 +29,15 @@ rm -rf "$HOME/Library/Developer/Xcode/DerivedData/MathScapeAI-"*
   fi
 )
 
+APP_DELEGATE="$(find ios -path "*/AppDelegate.swift" -print -quit)"
+if [[ -n "$APP_DELEGATE" ]]; then
+  echo "Generated AppDelegate.swift before compatibility patch:"
+  sed -n '1,220p' "$APP_DELEGATE"
+  ruby -0pi -e 'gsub(/^import React\n/, "import React_RCTAppDelegate\nimport React_RCTBundleURLProvider\n")' "$APP_DELEGATE"
+  echo "Generated AppDelegate.swift after compatibility patch:"
+  sed -n '1,220p' "$APP_DELEGATE"
+fi
+
 WORKSPACE="$(find ios -maxdepth 2 -name "*.xcworkspace" -print -quit)"
 if [[ -z "${WORKSPACE}" ]]; then
   echo "Could not find an iOS workspace."
