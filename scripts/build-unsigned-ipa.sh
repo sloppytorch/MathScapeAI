@@ -37,6 +37,9 @@ echo "Building unsigned iOS app with scheme: ${SCHEME}"
 rm -rf build unsigned-ipa MathScapeAI-unsigned.ipa
 
 set +e
+CODE_SIGNING_ALLOWED=NO \
+CODE_SIGNING_REQUIRED=NO \
+CODE_SIGN_IDENTITY="" \
 xcodebuild \
   -workspace "$WORKSPACE" \
   -scheme "$SCHEME" \
@@ -44,9 +47,6 @@ xcodebuild \
   -sdk iphoneos \
   -destination "generic/platform=iOS" \
   -derivedDataPath build/DerivedData \
-  CODE_SIGNING_ALLOWED=NO \
-  CODE_SIGNING_REQUIRED=NO \
-  CODE_SIGN_IDENTITY="" \
   build 2>&1 | tee build/xcodebuild.log
 XCODE_STATUS=${PIPESTATUS[0]}
 set -e
