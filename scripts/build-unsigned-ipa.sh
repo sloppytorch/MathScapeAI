@@ -3,6 +3,7 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
+CONFIGURATION="${CONFIGURATION:-Debug}"
 
 mkdir -p build
 exec > >(tee build/full-build.log) 2>&1
@@ -29,15 +30,6 @@ rm -rf "$HOME/Library/Developer/Xcode/DerivedData/MathScapeAI-"*
   fi
 )
 
-APP_DELEGATE="$(find ios -path "*/AppDelegate.swift" -print -quit)"
-if [[ -n "$APP_DELEGATE" ]]; then
-  echo "Generated AppDelegate.swift before compatibility patch:"
-  sed -n '1,220p' "$APP_DELEGATE"
-  ruby -0pi -e 'gsub(/^import React\n/, "")' "$APP_DELEGATE"
-  echo "Generated AppDelegate.swift after compatibility patch:"
-  sed -n '1,220p' "$APP_DELEGATE"
-fi
-
 WORKSPACE="$(find ios -maxdepth 2 -name "*.xcworkspace" -print -quit)"
 if [[ -z "${WORKSPACE}" ]]; then
   echo "Could not find an iOS workspace."
@@ -54,22 +46,9 @@ if [[ -z "${SCHEME}" ]]; then
   exit 1
 fi
 
-echo "Building unsigned iOS app with scheme: ${SCHEME}"
+echo "Building unsigned iOS app with scheme: ${SCHEME} (${CONFIGURATION})"
 rm -rf build/DerivedData unsigned-ipa MathScapeAI-unsigned.ipa
 mkdir -p build
-
-echo "Pre-seeding CocoaPods module maps for Swift app compilation..."
-PRODUCTS_DIR="$ROOT_DIR/build/DerivedData/Build/Products/Release-iphoneos"
-mkdir -p "$PRODUCTS_DIR"
-for POD_NAME in EXConstants Expo ExpoAsset ExpoDomWebView ExpoFileSystem ExpoFont ExpoImagePicker ExpoKeepAwake ExpoLogBox ExpoModulesCore RCTSwiftUI; do
-  SUPPORT_DIR="$ROOT_DIR/ios/Pods/Target Support Files/$POD_NAME"
-  DEST_DIR="$PRODUCTS_DIR/$POD_NAME"
-  if [[ -d "$SUPPORT_DIR" ]]; then
-    mkdir -p "$DEST_DIR"
-    cp "$SUPPORT_DIR"/*.modulemap "$DEST_DIR/" 2>/dev/null || true
-    cp "$SUPPORT_DIR"/*-umbrella.h "$DEST_DIR/" 2>/dev/null || true
-  fi
-done
 
 set +e
 CODE_SIGNING_ALLOWED=NO \
@@ -81,7 +60,7 @@ PROVISIONING_PROFILE_SPECIFIER="" \
 xcodebuild \
   -workspace "$WORKSPACE" \
   -scheme "$SCHEME" \
-  -configuration Release \
+  -configuration "$CONFIGURATION" \
   -sdk iphoneos \
   -destination "generic/platform=iOS" \
   -derivedDataPath build/DerivedData \
@@ -104,7 +83,7 @@ if [[ "$XCODE_STATUS" -ne 0 ]]; then
   exit "$XCODE_STATUS"
 fi
 
-APP_PATH="$(find build/DerivedData/Build/Products/Release-iphoneos -maxdepth 1 -name "*.app" -type d -print -quit)"
+APP_PATH="$(find "build/DerivedData/Build/Products/${CONFIGURATION}-iphoneos" -maxdepth 1 -name "*.app" -type d -print -quit)"
 if [[ -z "${APP_PATH}" ]]; then
   echo "Could not find the built .app bundle."
   exit 1
