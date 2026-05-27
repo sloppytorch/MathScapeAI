@@ -19,9 +19,15 @@ rm -rf "$HOME/Library/Developer/Xcode/DerivedData/MathScapeAI-"*
 (
   cd ios
   rm -rf Pods Podfile.lock
+  echo "Installing CocoaPods dependencies..."
   set +e
-  pod install --repo-update --verbose 2>&1 | tee ../build/pod-install.log
+  pod install --verbose 2>&1 | tee ../build/pod-install.log
   POD_STATUS=${PIPESTATUS[0]}
+  if [[ "$POD_STATUS" -ne 0 ]]; then
+    echo "pod install failed with status ${POD_STATUS}. Retrying with --repo-update..."
+    pod install --repo-update --verbose 2>&1 | tee -a ../build/pod-install.log
+    POD_STATUS=${PIPESTATUS[0]}
+  fi
   set -e
   if [[ "$POD_STATUS" -ne 0 ]]; then
     echo "pod install failed with status ${POD_STATUS}. Last 240 log lines:"
