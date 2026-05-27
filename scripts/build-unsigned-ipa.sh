@@ -25,16 +25,26 @@ fi
 echo "Building unsigned iOS app with scheme: ${SCHEME}"
 rm -rf build unsigned-ipa MathScapeAI-unsigned.ipa
 
+set +e
 xcodebuild \
   -workspace "$WORKSPACE" \
   -scheme "$SCHEME" \
   -configuration Release \
   -sdk iphoneos \
+  -destination "generic/platform=iOS" \
   -derivedDataPath build/DerivedData \
   CODE_SIGNING_ALLOWED=NO \
   CODE_SIGNING_REQUIRED=NO \
   CODE_SIGN_IDENTITY="" \
-  build
+  build 2>&1 | tee build/xcodebuild.log
+XCODE_STATUS=${PIPESTATUS[0]}
+set -e
+
+if [[ "$XCODE_STATUS" -ne 0 ]]; then
+  echo "xcodebuild failed with status ${XCODE_STATUS}. Last 200 log lines:"
+  tail -200 build/xcodebuild.log
+  exit "$XCODE_STATUS"
+fi
 
 APP_PATH="$(find build/DerivedData/Build/Products/Release-iphoneos -maxdepth 1 -name "*.app" -type d -print -quit)"
 if [[ -z "${APP_PATH}" ]]; then

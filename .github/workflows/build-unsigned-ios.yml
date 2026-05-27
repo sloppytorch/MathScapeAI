@@ -2,10 +2,13 @@ name: Build Unsigned iOS IPA
 
 on:
   workflow_dispatch:
+  push:
+    branches:
+      - main
 
 jobs:
   build:
-    runs-on: macos-15
+    runs-on: macos-latest
     timeout-minutes: 60
 
     steps:
@@ -25,6 +28,14 @@ jobs:
 
       - name: Build unsigned IPA
         run: bash scripts/build-unsigned-ipa.sh
+
+      - name: Upload Xcode log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: xcodebuild-log
+          path: build/xcodebuild.log
+          if-no-files-found: ignore
 
       - name: Upload IPA artifact
         uses: actions/upload-artifact@v4
