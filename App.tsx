@@ -1,6 +1,6 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as ImagePicker from 'expo-image-picker';
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import React, { Component, ReactNode, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   Alert,
@@ -17,6 +17,7 @@ import {
 } from 'react-native';
 
 type Mode = 'home' | 'board' | 'settings';
+type LastAction = 'solve' | 'check' | null;
 
 type MathStep = {
   id: string;
@@ -51,9 +52,19 @@ type WhiteboardObject = {
   metadata?: Record<string, unknown>;
 };
 
+type PersistedState = {
+  typedProblem: string;
+  imageUri?: string;
+  solution: MathSolution;
+  objects: WhiteboardObject[];
+  feedback: string;
+};
+
 const NVIDIA_URL = 'https://integrate.api.nvidia.com/v1/chat/completions';
 const NIM_MODEL = 'meta/llama-3.2-90b-vision-instruct';
 const API_KEY_STORAGE = 'mathscape:nvidia-api-key';
+const APP_STATE_STORAGE = 'mathscape:app-state:v1';
+const EMPTY_VIEWPORT: Viewport = { offsetX: 0, offsetY: 0, zoom: 1 };
 
 const SYSTEM_PROMPT = `You are MathScape AI, an expert math tutor and visual reasoning assistant.
 
@@ -78,28 +89,119 @@ function extractJson(text: string) {
   const start = cleaned.indexOf('{');
   const end = cleaned.lastIndexOf('}');
   if (start === -1 || end === -1) {
-    throw new Error('The AI did not return JSON.');
+    throw new Error('AI response could not be parsed. Try again or simplify the problem.');
   }
-  return JSON.parse(cleaned.slice(start, end + 1));
+  try {
+    return JSON.parse(cleaned.slice(start, end + 1));
+  } catch {
+    throw new Error('AI response could not be parsed. Try again or simplify the problem.');
+  }
 }
 
-export default function App() {
+function friendlyError(error: unknown) {
+  if (error instanceof Error) {
+    if (error.message.includes('401') || error.message.includes('403')) {
+      return 'NVIDIA rejected the API key. Open Settings, check the key, then retry.';
+    }
+    if (error.message.includes('429')) {
+      return 'NVIDIA is rate limiting this key. Wait a minute, then retry.';
+    }
+    if (error.message.includes('Network request failed')) {
+      return 'Network request failed. Check Wi-Fi or cellular, then retry.';
+    }
+    return error.message;
+  }
+  return 'Something went wrong. Try again.';
+}
+
+function normalizeSolution(parsed: any, typedProblem: string): MathSolution {
+  return {
+    problemStatement: String(parsed.problemStatement ?? typedProblem ?? ''),
+    finalAnswer: String(parsed.finalAnswer ?? ''),
+    steps: Array.isArray(parsed.steps)
+      ? parsed.steps.map((step: any, index: number) => ({
+          id: String(step.id ?? `step_${index + 1}`),
+          title: String(step.title ?? `Step ${index + 1}`),
+          math: String(step.math ?? ''),
+          explanation: String(step.explanation ?? '')
+        }))
+      : [],
+    conceptExplanation: String(parsed.conceptExplanation ?? ''),
+    commonMistakes: Array.isArray(parsed.commonMistakes) ? parsed.commonMistakes.map(String) : []
+  };
+}
+
+class StartupErrorBoundary extends Component<{ children: ReactNode }, { error?: Error }> {
+  state: { error?: Error } = {};
+
+  static getDerivedStateFromError(error: Error) {
+    return { error };
+  }
+
+  render() {
+    if (this.state.error) {
+      return (
+        <Shell>
+          <View style={styles.crashPanel}>
+            <Text style={styles.title}>MathScape AI</Text>
+            <Text style={styles.sectionTitle}>Something crashed on startup.</Text>
+            <Text style={styles.helpText}>{this.state.error.message}</Text>
+            <PrimaryButton label="Try Again" onPress={() => this.setState({ error: undefined })} />
+          </View>
+        </Shell>
+      );
+    }
+    return this.props.children;
+  }
+}
+
+function MathScapeApp() {
   const [mode, setMode] = useState<Mode>('home');
   const [apiKey, setApiKey] = useState('');
   const [typedProblem, setTypedProblem] = useState('');
   const [imageUri, setImageUri] = useState<string | undefined>();
   const [solution, setSolution] = useState<MathSolution>(fallbackSolution);
   const [objects, setObjects] = useState<WhiteboardObject[]>([]);
-  const [viewport, setViewport] = useState<Viewport>({ offsetX: 0, offsetY: 0, zoom: 1 });
+  const [viewport, setViewport] = useState<Viewport>(EMPTY_VIEWPORT);
   const [busy, setBusy] = useState(false);
   const [feedback, setFeedback] = useState('');
+  const [errorMessage, setErrorMessage] = useState('');
+  const [lastAction, setLastAction] = useState<LastAction>(null);
+  const [hydrated, setHydrated] = useState(false);
   const joystick = useRef({ dx: 0, dy: 0, active: false });
 
   useEffect(() => {
-    AsyncStorage.getItem(API_KEY_STORAGE).then((saved) => {
-      if (saved) setApiKey(saved);
-    });
+    async function hydrate() {
+      try {
+        const [savedKey, savedState] = await Promise.all([
+          AsyncStorage.getItem(API_KEY_STORAGE),
+          AsyncStorage.getItem(APP_STATE_STORAGE)
+        ]);
+        if (savedKey) setApiKey(savedKey);
+        if (savedState) {
+          const parsed = JSON.parse(savedState) as Partial<PersistedState>;
+          setTypedProblem(parsed.typedProblem ?? '');
+          setImageUri(parsed.imageUri);
+          setSolution(parsed.solution ?? fallbackSolution);
+          setObjects(Array.isArray(parsed.objects) ? parsed.objects : []);
+          setFeedback(parsed.feedback ?? '');
+        }
+      } catch {
+        setErrorMessage('Saved app state could not be loaded. You can keep working or start a new problem.');
+      } finally {
+        setHydrated(true);
+      }
+    }
+    hydrate();
   }, []);
+
+  useEffect(() => {
+    if (!hydrated) return;
+    const state: PersistedState = { typedProblem, imageUri, solution, objects, feedback };
+    AsyncStorage.setItem(APP_STATE_STORAGE, JSON.stringify(state)).catch(() => {
+      setErrorMessage('Could not save your latest work on this device.');
+    });
+  }, [feedback, hydrated, imageUri, objects, solution, typedProblem]);
 
   useEffect(() => {
     let frame = 0;
@@ -118,8 +220,36 @@ export default function App() {
   }, []);
 
   const saveApiKey = async () => {
-    await AsyncStorage.setItem(API_KEY_STORAGE, apiKey.trim());
+    const nextKey = apiKey.trim();
+    await AsyncStorage.setItem(API_KEY_STORAGE, nextKey);
+    setApiKey(nextKey);
+    setErrorMessage('');
     Alert.alert('Saved', 'Your NVIDIA API key is saved on this device.');
+  };
+
+  const clearApiKey = async () => {
+    await AsyncStorage.removeItem(API_KEY_STORAGE);
+    setApiKey('');
+    setErrorMessage('API key cleared. Add a key before solving or checking work.');
+  };
+
+  const resetBoard = () => {
+    setObjects(buildSolutionObjects(solution, imageUri));
+    setFeedback('');
+    setViewport(EMPTY_VIEWPORT);
+    setErrorMessage('');
+  };
+
+  const newProblem = async () => {
+    setTypedProblem('');
+    setImageUri(undefined);
+    setSolution(fallbackSolution);
+    setObjects([]);
+    setFeedback('');
+    setViewport(EMPTY_VIEWPORT);
+    setErrorMessage('');
+    setMode('home');
+    await AsyncStorage.removeItem(APP_STATE_STORAGE);
   };
 
   const pickImage = async (camera: boolean) => {
@@ -128,6 +258,7 @@ export default function App() {
       : await ImagePicker.requestMediaLibraryPermissionsAsync();
 
     if (!permission.granted) {
+      setErrorMessage('Permission is needed to use that input.');
       Alert.alert('Permission needed', 'MathScape needs permission to use this input.');
       return;
     }
@@ -139,21 +270,42 @@ export default function App() {
     if (!result.canceled) {
       const asset = result.assets[0];
       setImageUri(asset.base64 ? `data:image/jpeg;base64,${asset.base64}` : asset.uri);
+      setErrorMessage('');
     }
   };
 
+  const callNvidia = async (body: Record<string, unknown>) => {
+    const response = await fetch(NVIDIA_URL, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${apiKey.trim()}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify(body)
+    });
+
+    if (!response.ok) {
+      const detail = await response.text().catch(() => '');
+      throw new Error(`NVIDIA request failed: ${response.status}${detail ? ` - ${detail.slice(0, 180)}` : ''}`);
+    }
+
+    return response.json();
+  };
+
   const solveProblem = async () => {
+    setLastAction('solve');
     if (!apiKey.trim()) {
-      Alert.alert('API key needed', 'Open Settings and add your NVIDIA API key first.');
+      setErrorMessage('Open Settings and add your NVIDIA API key first.');
       return;
     }
     if (!typedProblem.trim() && !imageUri) {
-      Alert.alert('Add a problem', 'Type a math problem or upload an image.');
+      setErrorMessage('Type a math problem or upload an image first.');
       return;
     }
 
     setBusy(true);
     setFeedback('');
+    setErrorMessage('');
     try {
       const content: any[] = [
         {
@@ -166,99 +318,84 @@ export default function App() {
         content.push({ type: 'image_url', image_url: { url: imageUri } });
       }
 
-      const response = await fetch(NVIDIA_URL, {
-        method: 'POST',
-        headers: {
-          Authorization: `Bearer ${apiKey.trim()}`,
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify({
-          model: NIM_MODEL,
-          messages: [
-            { role: 'system', content: SYSTEM_PROMPT },
-            { role: 'user', content }
-          ],
-          temperature: 0.2,
-          max_tokens: 2048
-        })
+      const data = await callNvidia({
+        model: NIM_MODEL,
+        messages: [
+          { role: 'system', content: SYSTEM_PROMPT },
+          { role: 'user', content }
+        ],
+        temperature: 0.2,
+        max_tokens: 2048
       });
-
-      if (!response.ok) {
-        throw new Error(`NVIDIA request failed: ${response.status}`);
-      }
-
-      const data = await response.json();
       const parsed = extractJson(data.choices?.[0]?.message?.content ?? '');
-      const nextSolution: MathSolution = {
-        problemStatement: parsed.problemStatement ?? typedProblem,
-        finalAnswer: parsed.finalAnswer ?? '',
-        steps: Array.isArray(parsed.steps) ? parsed.steps : [],
-        conceptExplanation: parsed.conceptExplanation ?? '',
-        commonMistakes: Array.isArray(parsed.commonMistakes) ? parsed.commonMistakes : []
-      };
+      const nextSolution = normalizeSolution(parsed, typedProblem);
       setSolution(nextSolution);
       setObjects(buildSolutionObjects(nextSolution, imageUri));
+      setViewport(EMPTY_VIEWPORT);
       setMode('board');
     } catch (error) {
-      Alert.alert('Solve failed', error instanceof Error ? error.message : 'Unknown error');
+      setErrorMessage(friendlyError(error));
     } finally {
       setBusy(false);
     }
   };
 
   const checkWork = async () => {
+    setLastAction('check');
     if (!apiKey.trim()) {
-      Alert.alert('API key needed', 'Open Settings and add your NVIDIA API key first.');
+      setErrorMessage('Open Settings and add your NVIDIA API key first.');
       return;
     }
+    if (solution === fallbackSolution && objects.length === 0) {
+      setErrorMessage('Solve or add work to the board before checking it.');
+      return;
+    }
+
     setBusy(true);
+    setErrorMessage('');
     try {
-      const response = await fetch(NVIDIA_URL, {
-        method: 'POST',
-        headers: {
-          Authorization: `Bearer ${apiKey.trim()}`,
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify({
-          model: NIM_MODEL,
-          messages: [
-            { role: 'system', content: SYSTEM_PROMPT },
-            {
-              role: 'user',
-              content: `Mode: CHECK_WHITEBOARD_WORK. Return JSON only. Original problem: ${solution.problemStatement}. Expected solution: ${JSON.stringify(solution)}. Whiteboard objects: ${JSON.stringify(objects)}`
-            }
-          ],
-          temperature: 0.1,
-          max_tokens: 1600
-        })
+      const data = await callNvidia({
+        model: NIM_MODEL,
+        messages: [
+          { role: 'system', content: SYSTEM_PROMPT },
+          {
+            role: 'user',
+            content: `Mode: CHECK_WHITEBOARD_WORK. Return JSON only. Original problem: ${solution.problemStatement}. Expected solution: ${JSON.stringify(solution)}. Whiteboard objects: ${JSON.stringify(objects)}`
+          }
+        ],
+        temperature: 0.1,
+        max_tokens: 1600
       });
 
-      if (!response.ok) {
-        throw new Error(`NVIDIA request failed: ${response.status}`);
-      }
-
-      const data = await response.json();
       const parsed = extractJson(data.choices?.[0]?.message?.content ?? '');
-      const summary = parsed.summary ?? (parsed.isCorrect ? 'Your work looks correct.' : 'There is something to review.');
+      const summary = String(parsed.summary ?? (parsed.isCorrect ? 'Your work looks correct.' : 'There is something to review.'));
       setFeedback(summary);
       const feedbackObjects = Array.isArray(parsed.feedbackObjects) ? parsed.feedbackObjects : [];
       setObjects((current) => [
         ...current,
-        ...feedbackObjects.map((item: any, index: number) => ({
-          id: item.id ?? `feedback_${Date.now()}_${index}`,
+        ...(feedbackObjects.length ? feedbackObjects : [{ content: summary }]).map((item: any, index: number) => ({
+          id: String(item.id ?? `feedback_${Date.now()}_${index}`),
           type: 'feedback' as const,
           x: Number(item.x ?? 20),
-          y: Number(item.y ?? 360 + index * 88),
-          width: 280,
-          height: 76,
-          content: item.content ?? summary,
+          y: Number(item.y ?? 360 + index * 92),
+          width: Number(item.width ?? 290),
+          height: Number(item.height ?? 84),
+          content: String(item.content ?? summary),
           metadata: item.metadata ?? { severity: parsed.isCorrect ? 'success' : 'error' }
         }))
       ]);
     } catch (error) {
-      Alert.alert('Check failed', error instanceof Error ? error.message : 'Unknown error');
+      setErrorMessage(friendlyError(error));
     } finally {
       setBusy(false);
+    }
+  };
+
+  const retryLastAction = () => {
+    if (lastAction === 'check') {
+      checkWork();
+    } else {
+      solveProblem();
     }
   };
 
@@ -270,7 +407,7 @@ export default function App() {
         type: 'text',
         x: -viewport.offsetX + 40,
         y: -viewport.offsetY + 80,
-        width: 260,
+        width: 280,
         height: 120,
         content: 'Write your step here'
       }
@@ -294,29 +431,47 @@ export default function App() {
 
   const moveObject = useCallback((id: string, dx: number, dy: number) => {
     setObjects((current) =>
-      current.map((object) => object.id === id ? { ...object, x: object.x + dx, y: object.y + dy } : object)
+      current.map((object) => (object.id === id ? { ...object, x: object.x + dx, y: object.y + dy } : object))
     );
   }, []);
+
+  const updateObjectContent = useCallback((id: string, content: string) => {
+    setObjects((current) =>
+      current.map((object) => (object.id === id ? { ...object, content } : object))
+    );
+  }, []);
+
+  if (!hydrated) {
+    return (
+      <Shell>
+        <LoadingOverlay label="Opening MathScape..." />
+      </Shell>
+    );
+  }
 
   if (mode === 'settings') {
     return (
       <Shell>
         <Header title="Settings" onBack={() => setMode('home')} />
-        <View style={styles.panel}>
-          <Text style={styles.label}>NVIDIA API Key</Text>
-          <TextInput
-            value={apiKey}
-            onChangeText={setApiKey}
-            placeholder="nvapi-..."
-            secureTextEntry
-            autoCapitalize="none"
-            style={styles.input}
-          />
-          <PrimaryButton label="Save Key" onPress={saveApiKey} />
-          <Text style={styles.helpText}>
-            For a production release, route NVIDIA requests through your own backend so the key is never shipped in the app.
-          </Text>
-        </View>
+        <ScrollView contentContainerStyle={styles.homeContent}>
+          {errorMessage ? <ErrorBanner message={errorMessage} onRetry={retryLastAction} /> : null}
+          <View style={styles.panel}>
+            <Text style={styles.label}>NVIDIA API Key</Text>
+            <TextInput
+              value={apiKey}
+              onChangeText={setApiKey}
+              placeholder="nvapi-..."
+              secureTextEntry
+              autoCapitalize="none"
+              style={styles.input}
+            />
+            <PrimaryButton label="Save Key" onPress={saveApiKey} />
+            <SecondaryButton label="Clear Key" onPress={clearApiKey} />
+            <Text style={styles.helpText}>
+              This prototype stores the key only on this device. For a public release, route NVIDIA calls through a backend proxy so the key is never exposed in the app.
+            </Text>
+          </View>
+        </ScrollView>
       </Shell>
     );
   }
@@ -330,23 +485,32 @@ export default function App() {
           <Pressable onPress={() => setMode('settings')} style={styles.iconButton}><Text style={styles.iconText}>Key</Text></Pressable>
         </View>
 
-        <View style={styles.toolbar}>
+        <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.toolbar}>
           <Tool label="Text" onPress={addText} />
           <Tool label="Check Work" onPress={checkWork} />
-          <Tool label="Reset" onPress={() => setViewport({ offsetX: 0, offsetY: 0, zoom: 1 })} />
+          <Tool label="Reset Board" onPress={resetBoard} />
+          <Tool label="New Problem" onPress={newProblem} />
+          <Tool label="Center" onPress={() => setViewport(EMPTY_VIEWPORT)} />
           <Tool label="+" onPress={() => setViewport((v) => ({ ...v, zoom: Math.min(1.8, v.zoom + 0.1) }))} />
           <Tool label="-" onPress={() => setViewport((v) => ({ ...v, zoom: Math.max(0.6, v.zoom - 0.1) }))} />
-        </View>
+        </ScrollView>
 
+        {errorMessage ? <ErrorBanner message={errorMessage} onRetry={retryLastAction} /> : null}
         {feedback ? <Text style={styles.feedback}>{feedback}</Text> : null}
 
         <View style={styles.canvas} {...panResponder.panHandlers}>
           <Grid viewport={viewport} />
           {objects.map((object) => (
-            <BoardObject key={object.id} object={object} viewport={viewport} onMove={moveObject} />
+            <BoardObject
+              key={object.id}
+              object={object}
+              viewport={viewport}
+              onMove={moveObject}
+              onChangeContent={updateObjectContent}
+            />
           ))}
           <Joystick joystick={joystick} />
-          {busy ? <LoadingOverlay /> : null}
+          {busy ? <LoadingOverlay label="Thinking..." /> : null}
         </View>
       </Shell>
     );
@@ -365,6 +529,7 @@ export default function App() {
       </View>
 
       <ScrollView contentContainerStyle={styles.homeContent}>
+        {errorMessage ? <ErrorBanner message={errorMessage} onRetry={retryLastAction} /> : null}
         <View style={styles.panel}>
           <Text style={styles.label}>Type a problem</Text>
           <TextInput
@@ -380,7 +545,10 @@ export default function App() {
           </View>
           {imageUri ? <Image source={{ uri: imageUri }} style={styles.preview} /> : null}
           <PrimaryButton label={busy ? 'Solving...' : 'Solve'} onPress={solveProblem} disabled={busy} />
-          <SecondaryButton label="Open Whiteboard" onPress={() => setMode('board')} />
+          <View style={styles.row}>
+            <SecondaryButton label="Open Whiteboard" onPress={() => setMode('board')} />
+            <SecondaryButton label="New Problem" onPress={newProblem} />
+          </View>
         </View>
 
         <View style={styles.panel}>
@@ -393,10 +561,19 @@ export default function App() {
               <Text style={styles.explain}>{step.explanation}</Text>
             </View>
           ))}
+          {solution.conceptExplanation ? <Text style={styles.explain}>{solution.conceptExplanation}</Text> : null}
         </View>
       </ScrollView>
-      {busy ? <LoadingOverlay /> : null}
+      {busy ? <LoadingOverlay label="Thinking..." /> : null}
     </Shell>
+  );
+}
+
+export default function App() {
+  return (
+    <StartupErrorBoundary>
+      <MathScapeApp />
+    </StartupErrorBoundary>
   );
 }
 
@@ -429,7 +606,7 @@ function buildSolutionObjects(solution: MathSolution, imageUri?: string): Whiteb
   ];
 }
 
-function Shell({ children }: { children: React.ReactNode }) {
+function Shell({ children }: { children: ReactNode }) {
   return (
     <SafeAreaView style={styles.safe}>
       <StatusBar barStyle="dark-content" />
@@ -444,6 +621,17 @@ function Header({ title, onBack }: { title: string; onBack: () => void }) {
       <Pressable onPress={onBack} style={styles.iconButton}><Text style={styles.iconText}>Back</Text></Pressable>
       <Text style={styles.boardTitle}>{title}</Text>
       <View style={styles.iconButton} />
+    </View>
+  );
+}
+
+function ErrorBanner({ message, onRetry }: { message: string; onRetry: () => void }) {
+  return (
+    <View style={styles.errorBanner}>
+      <Text style={styles.errorText}>{message}</Text>
+      <Pressable onPress={onRetry} style={styles.retryButton}>
+        <Text style={styles.retryText}>Retry</Text>
+      </Pressable>
     </View>
   );
 }
@@ -486,16 +674,18 @@ function Grid({ viewport }: { viewport: Viewport }) {
 function BoardObject({
   object,
   viewport,
-  onMove
+  onMove,
+  onChangeContent
 }: {
   object: WhiteboardObject;
   viewport: Viewport;
   onMove: (id: string, dx: number, dy: number) => void;
+  onChangeContent: (id: string, content: string) => void;
 }) {
   const responder = useMemo(
     () =>
       PanResponder.create({
-        onMoveShouldSetPanResponder: () => true,
+        onMoveShouldSetPanResponder: (_, gesture) => Math.abs(gesture.dx) > 8 || Math.abs(gesture.dy) > 8,
         onPanResponderMove: (_, gesture) => {
           onMove(object.id, gesture.vx * 6 / viewport.zoom, gesture.vy * 6 / viewport.zoom);
         }
@@ -525,6 +715,13 @@ function BoardObject({
     >
       {object.imageUri ? (
         <Image source={{ uri: object.imageUri }} style={styles.objectImage} resizeMode="cover" />
+      ) : object.type === 'text' ? (
+        <TextInput
+          value={object.content ?? ''}
+          onChangeText={(content) => onChangeContent(object.id, content)}
+          multiline
+          style={styles.objectInput}
+        />
       ) : (
         <Text style={styles.objectText}>{object.content}</Text>
       )}
@@ -567,11 +764,11 @@ function Joystick({ joystick }: { joystick: React.MutableRefObject<{ dx: number;
   );
 }
 
-function LoadingOverlay() {
+function LoadingOverlay({ label }: { label: string }) {
   return (
     <View style={styles.loading}>
       <ActivityIndicator size="large" color="#f7f3ea" />
-      <Text style={styles.loadingText}>Thinking...</Text>
+      <Text style={styles.loadingText}>{label}</Text>
     </View>
   );
 }
@@ -621,6 +818,36 @@ const styles = StyleSheet.create({
     borderRadius: 8,
     padding: 16,
     gap: 12
+  },
+  crashPanel: {
+    flex: 1,
+    justifyContent: 'center',
+    padding: 18,
+    gap: 14
+  },
+  errorBanner: {
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#c64545',
+    backgroundColor: '#fff0f0',
+    padding: 12,
+    gap: 10
+  },
+  errorText: {
+    color: '#7a2525',
+    fontWeight: '700',
+    lineHeight: 20
+  },
+  retryButton: {
+    alignSelf: 'flex-start',
+    borderRadius: 8,
+    paddingHorizontal: 14,
+    paddingVertical: 9,
+    backgroundColor: '#7a2525'
+  },
+  retryText: {
+    color: '#fff',
+    fontWeight: '800'
   },
   label: {
     fontSize: 14,
@@ -815,6 +1042,15 @@ const styles = StyleSheet.create({
     fontSize: 14,
     lineHeight: 19,
     fontWeight: '600'
+  },
+  objectInput: {
+    minHeight: 92,
+    color: '#17201b',
+    fontSize: 14,
+    lineHeight: 19,
+    fontWeight: '600',
+    padding: 0,
+    textAlignVertical: 'top'
   },
   objectImage: {
     width: '100%',
