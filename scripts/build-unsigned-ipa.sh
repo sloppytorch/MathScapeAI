@@ -48,10 +48,20 @@ fi
 PODS_SCHEME="$(echo "$SCHEMES_JSON" | ruby -rjson -e 'data = JSON.parse(STDIN.read); schemes = data.dig("workspace", "schemes") || []; puts schemes.find { |s| s == "Pods-MathScapeAI" || s.start_with?("Pods-") }')"
 
 echo "Building unsigned iOS app with scheme: ${SCHEME}"
-rm -rf build unsigned-ipa MathScapeAI-unsigned.ipa
+rm -rf build/DerivedData unsigned-ipa MathScapeAI-unsigned.ipa
+mkdir -p build
 
-if [[ -n "${PODS_SCHEME}" ]]; then
-  echo "Building Pods scheme first: ${PODS_SCHEME}"
+PODS_PROJECT="ios/Pods/Pods.xcodeproj"
+PODS_PROJECT_SCHEME=""
+if [[ -d "${PODS_PROJECT}" ]]; then
+  PODS_PROJECT_JSON="$(xcodebuild -list -json -project "$PODS_PROJECT")"
+  echo "Available Pods project schemes:"
+  echo "$PODS_PROJECT_JSON" | ruby -rjson -e 'data = JSON.parse(STDIN.read); puts(data.dig("project", "schemes") || [])'
+  PODS_PROJECT_SCHEME="$(echo "$PODS_PROJECT_JSON" | ruby -rjson -e 'data = JSON.parse(STDIN.read); schemes = data.dig("project", "schemes") || []; puts schemes.find { |s| s == "Pods-MathScapeAI" } || schemes.first')"
+fi
+
+if [[ -n "${PODS_PROJECT_SCHEME}" ]]; then
+  echo "Building Pods project scheme first: ${PODS_PROJECT_SCHEME}"
   CODE_SIGNING_ALLOWED=NO \
   CODE_SIGNING_REQUIRED=NO \
   CODE_SIGN_IDENTITY="" \
@@ -59,8 +69,8 @@ if [[ -n "${PODS_SCHEME}" ]]; then
   DEVELOPMENT_TEAM="" \
   PROVISIONING_PROFILE_SPECIFIER="" \
   xcodebuild \
-    -workspace "$WORKSPACE" \
-    -scheme "$PODS_SCHEME" \
+    -project "$PODS_PROJECT" \
+    -scheme "$PODS_PROJECT_SCHEME" \
     -configuration Release \
     -sdk iphoneos \
     -destination "generic/platform=iOS" \
