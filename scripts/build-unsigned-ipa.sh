@@ -80,7 +80,7 @@ CODE_SIGN_IDENTITY="" \
 CODE_SIGN_STYLE=Manual \
 DEVELOPMENT_TEAM="" \
 PROVISIONING_PROFILE_SPECIFIER="" \
-xcodebuild \
+run_with_heartbeat "xcodebuild" xcodebuild \
   -workspace "$WORKSPACE" \
   -scheme "$SCHEME" \
   -configuration "$CONFIGURATION" \
