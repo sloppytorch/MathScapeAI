@@ -19,7 +19,8 @@ import {
 import Svg, { Path } from 'react-native-svg';
 
 type Mode = 'home' | 'board' | 'settings';
-type LastAction = 'solve' | 'check' | 'cleanInk' | null;
+type LastAction = 'solve' | 'check' | 'smartScript' | null;
+type DrawingTool = 'pen' | 'eraser';
 
 type MathStep = {
   id: string;
@@ -71,6 +72,12 @@ type CanvasSize = {
   height: number;
 };
 
+type BoardSnapshot = {
+  objects: WhiteboardObject[];
+  inkStrokes: InkStroke[];
+  feedback: string;
+};
+
 type PersistedState = {
   typedProblem: string;
   imageUri?: string;
@@ -95,7 +102,7 @@ In SOLVE_PROBLEM mode, read the image or typed math problem, solve it step by st
 
 In CHECK_WHITEBOARD_WORK mode, compare the user's whiteboard work against the original problem and expected solution. Identify the first incorrect or unsupported step, explain the issue, provide a corrected step, and return JSON only.
 
-In CLEAN_INK mode, interpret rough handwritten math strokes from point paths. Return JSON only with this shape:
+In CLEAN_INK mode, behave like Smart Script: interpret rough handwritten math strokes from point paths and rewrite them as legible editable math text. Return JSON only with this shape:
 {"items":[{"text":"legible math text","x":20,"y":120}]}
 
 Return valid JSON only. Do not wrap JSON in markdown.`;
@@ -232,14 +239,19 @@ function MathScapeApp() {
   const [viewport, setViewport] = useState<Viewport>(EMPTY_VIEWPORT);
   const [canvasSize, setCanvasSize] = useState<CanvasSize>({ width: 1, height: 1 });
   const [drawMode, setDrawMode] = useState(false);
+  const [drawingTool, setDrawingTool] = useState<DrawingTool>('pen');
+  const [smartScriptEnabled, setSmartScriptEnabled] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
   const [busy, setBusy] = useState(false);
   const [feedback, setFeedback] = useState('');
   const [errorMessage, setErrorMessage] = useState('');
   const [lastAction, setLastAction] = useState<LastAction>(null);
+  const [undoStack, setUndoStack] = useState<BoardSnapshot[]>([]);
+  const [redoStack, setRedoStack] = useState<BoardSnapshot[]>([]);
   const [hydrated, setHydrated] = useState(false);
   const joystick = useRef({ dx: 0, dy: 0, active: false });
   const activeStrokeId = useRef<string | null>(null);
+  const smartScriptTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
     async function hydrate() {
@@ -291,6 +303,52 @@ function MathScapeApp() {
     return () => cancelAnimationFrame(frame);
   }, []);
 
+  useEffect(() => {
+    return () => {
+      if (smartScriptTimer.current) {
+        clearTimeout(smartScriptTimer.current);
+      }
+    };
+  }, []);
+
+  const snapshotBoard = useCallback((): BoardSnapshot => ({
+    objects,
+    inkStrokes,
+    feedback
+  }), [feedback, inkStrokes, objects]);
+
+  const pushUndo = useCallback(() => {
+    const snapshot = snapshotBoard();
+    setUndoStack((current) => [...current.slice(-24), snapshot]);
+    setRedoStack([]);
+  }, [snapshotBoard]);
+
+  const undoBoard = () => {
+    setUndoStack((current) => {
+      if (!current.length) return current;
+      const previous = current[current.length - 1];
+      setRedoStack((redo) => [...redo.slice(-24), snapshotBoard()]);
+      setObjects(previous.objects);
+      setInkStrokes(previous.inkStrokes);
+      setFeedback(previous.feedback);
+      return current.slice(0, -1);
+    });
+    setMenuOpen(false);
+  };
+
+  const redoBoard = () => {
+    setRedoStack((current) => {
+      if (!current.length) return current;
+      const next = current[current.length - 1];
+      setUndoStack((undo) => [...undo.slice(-24), snapshotBoard()]);
+      setObjects(next.objects);
+      setInkStrokes(next.inkStrokes);
+      setFeedback(next.feedback);
+      return current.slice(0, -1);
+    });
+    setMenuOpen(false);
+  };
+
   const saveApiKey = async () => {
     const nextKey = apiKey.trim();
     await AsyncStorage.setItem(API_KEY_STORAGE, nextKey);
@@ -306,6 +364,7 @@ function MathScapeApp() {
   };
 
   const resetBoard = () => {
+    pushUndo();
     setObjects(buildSolutionObjects(solution, imageUri));
     setInkStrokes([]);
     setFeedback('');
@@ -323,6 +382,10 @@ function MathScapeApp() {
     setFeedback('');
     setViewport(EMPTY_VIEWPORT);
     setDrawMode(false);
+    setDrawingTool('pen');
+    setSmartScriptEnabled(false);
+    setUndoStack([]);
+    setRedoStack([]);
     setMenuOpen(false);
     setErrorMessage('');
     setMode('home');
@@ -413,6 +476,7 @@ function MathScapeApp() {
         nextSolution = solutionFromLooseText(rawContent, typedProblem);
       }
       setSolution(nextSolution);
+      pushUndo();
       setObjects(buildSolutionObjects(nextSolution, imageUri));
       setInkStrokes([]);
       setViewport(EMPTY_VIEWPORT);
@@ -454,6 +518,7 @@ function MathScapeApp() {
 
       const parsed = extractJson(data.choices?.[0]?.message?.content ?? '');
       const summary = String(parsed.summary ?? (parsed.isCorrect ? 'Your work looks correct.' : 'There is something to review.'));
+      pushUndo();
       setFeedback(summary);
       const feedbackObjects = Array.isArray(parsed.feedbackObjects) ? parsed.feedbackObjects : [];
       setObjects((current) => [
@@ -479,14 +544,15 @@ function MathScapeApp() {
   const retryLastAction = () => {
     if (lastAction === 'check') {
       checkWork();
-    } else if (lastAction === 'cleanInk') {
-      cleanInk();
+    } else if (lastAction === 'smartScript') {
+      runSmartScript();
     } else {
       solveProblem();
     }
   };
 
   const addText = () => {
+    pushUndo();
     setObjects((current) => [
       ...current,
       {
@@ -501,14 +567,14 @@ function MathScapeApp() {
     ]);
   };
 
-  const cleanInk = async () => {
-    setLastAction('cleanInk');
+  const runSmartScript = async () => {
+    setLastAction('smartScript');
     if (!apiKey.trim()) {
-      setErrorMessage('Open Settings and add your NVIDIA API key before cleaning handwriting.');
+      setErrorMessage('Open Settings and add your NVIDIA API key before using Smart Script.');
       return;
     }
     if (!inkStrokes.length) {
-      setErrorMessage('Draw something on the board first, then use Clean Ink.');
+      setErrorMessage('Draw something on the board first, then use Smart Script.');
       return;
     }
 
@@ -521,7 +587,7 @@ function MathScapeApp() {
           { role: 'system', content: SYSTEM_PROMPT },
           {
             role: 'user',
-            content: `Mode: CLEAN_INK. Interpret these whiteboard strokes as math handwriting. Return JSON only. Problem context: ${solution.problemStatement}. Strokes: ${JSON.stringify(inkStrokes)}`
+            content: `Mode: CLEAN_INK. This is Smart Script. Convert rough handwritten math into legible editable math text. Return JSON only. Problem context: ${solution.problemStatement}. Strokes: ${JSON.stringify(inkStrokes)}`
           }
         ],
         response_format: { type: 'json_object' },
@@ -533,6 +599,7 @@ function MathScapeApp() {
       if (!items.length) {
         throw new Error('No legible handwriting was recognized. Try writing larger or with fewer connected symbols.');
       }
+      pushUndo();
       setObjects((current) => [
         ...current,
         ...items.map((item: any, index: number) => ({
@@ -545,12 +612,32 @@ function MathScapeApp() {
           content: String(item.text ?? item.content ?? '')
         }))
       ]);
-      setFeedback('Cleaned handwriting into editable text cards.');
+      setInkStrokes([]);
+      setFeedback('Smart Script converted handwriting into editable text cards.');
     } catch (error) {
       setErrorMessage(friendlyError(error));
     } finally {
       setBusy(false);
     }
+  };
+
+  const scheduleSmartScript = () => {
+    if (!smartScriptEnabled) return;
+    if (smartScriptTimer.current) {
+      clearTimeout(smartScriptTimer.current);
+    }
+    smartScriptTimer.current = setTimeout(() => {
+      runSmartScript();
+    }, 1300);
+  };
+
+  const eraseAtPoint = (point: InkPoint) => {
+    const radius = 24 / viewport.zoom;
+    setInkStrokes((current) =>
+      current.filter((stroke) =>
+        !stroke.points.some((strokePoint) => Math.hypot(strokePoint.x - point.x, strokePoint.y - point.y) <= radius)
+      )
+    );
   };
 
   const canvasResponder = useMemo(
@@ -564,6 +651,11 @@ function MathScapeApp() {
             x: event.nativeEvent.locationX / viewport.zoom - viewport.offsetX,
             y: event.nativeEvent.locationY / viewport.zoom - viewport.offsetY
           };
+          pushUndo();
+          if (drawingTool === 'eraser') {
+            eraseAtPoint(point);
+            return;
+          }
           const id = `ink_${Date.now()}`;
           activeStrokeId.current = id;
           setInkStrokes((current) => [
@@ -572,11 +664,16 @@ function MathScapeApp() {
           ]);
         },
         onPanResponderMove: (event) => {
-          if (!drawMode || !activeStrokeId.current) return;
+          if (!drawMode) return;
           const point = {
             x: event.nativeEvent.locationX / viewport.zoom - viewport.offsetX,
             y: event.nativeEvent.locationY / viewport.zoom - viewport.offsetY
           };
+          if (drawingTool === 'eraser') {
+            eraseAtPoint(point);
+            return;
+          }
+          if (!activeStrokeId.current) return;
           setInkStrokes((current) =>
             current.map((stroke) =>
               stroke.id === activeStrokeId.current
@@ -586,10 +683,13 @@ function MathScapeApp() {
           );
         },
         onPanResponderRelease: () => {
+          if (drawingTool === 'pen') {
+            scheduleSmartScript();
+          }
           activeStrokeId.current = null;
         }
       }),
-    [drawMode, viewport.offsetX, viewport.offsetY, viewport.zoom]
+    [drawMode, drawingTool, pushUndo, smartScriptEnabled, viewport.offsetX, viewport.offsetY, viewport.zoom]
   );
 
   const handleCanvasLayout = (event: LayoutChangeEvent) => {
@@ -671,13 +771,30 @@ function MathScapeApp() {
               {drawMode ? 'Drawing On' : 'Drawing Off'}
             </Text>
           </Pressable>
-          <Text style={styles.boardHint}>{drawMode ? 'Finger draws. Joystick moves the board.' : 'Joystick moves the board. Turn drawing on to write.'}</Text>
+          <Pressable
+            onPress={() => setDrawingTool((tool) => (tool === 'pen' ? 'eraser' : 'pen'))}
+            style={[styles.toolChip, drawingTool === 'eraser' && styles.toolChipActive]}
+          >
+            <Text style={[styles.toolChipText, drawingTool === 'eraser' && styles.toolChipTextActive]}>
+              {drawingTool === 'eraser' ? 'Eraser' : 'Pen'}
+            </Text>
+          </Pressable>
+          <Pressable
+            onPress={() => setSmartScriptEnabled((enabled) => !enabled)}
+            style={[styles.toolChip, smartScriptEnabled && styles.toolChipActive]}
+          >
+            <Text style={[styles.toolChipText, smartScriptEnabled && styles.toolChipTextActive]}>
+              Smart Script
+            </Text>
+          </Pressable>
+          <Text style={styles.boardHint}>{drawMode ? `${drawingTool === 'eraser' ? 'Erase ink' : 'Write with finger'}. Joystick moves the board.` : 'Joystick moves the board. Turn drawing on to write.'}</Text>
         </View>
 
         {menuOpen ? (
           <View style={styles.menuPanel}>
             <Tool label="Add Text" onPress={() => { addText(); setMenuOpen(false); }} />
-            <Tool label="Clean Ink" onPress={() => { cleanInk(); setMenuOpen(false); }} />
+            <Tool label="Undo" onPress={undoBoard} />
+            <Tool label="Redo" onPress={redoBoard} />
             <Tool label="Check Work" onPress={() => { checkWork(); setMenuOpen(false); }} />
             <Tool label="Reset Board" onPress={() => { resetBoard(); setMenuOpen(false); }} />
             <Tool label="New Problem" onPress={() => { newProblem(); setMenuOpen(false); }} />
@@ -1205,6 +1322,28 @@ const styles = StyleSheet.create({
     color: '#51615a',
     fontSize: 12,
     fontWeight: '700'
+  },
+  toolChip: {
+    minHeight: 34,
+    paddingHorizontal: 10,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#9a8f7f',
+    backgroundColor: '#fffaf0'
+  },
+  toolChipActive: {
+    borderColor: '#0f6b5f',
+    backgroundColor: '#0f6b5f'
+  },
+  toolChipText: {
+    color: '#17201b',
+    fontSize: 12,
+    fontWeight: '900'
+  },
+  toolChipTextActive: {
+    color: '#fff'
   },
   drawToggle: {
     minHeight: 34,
