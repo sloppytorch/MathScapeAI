@@ -65,6 +65,7 @@ type InkStroke = {
   points: InkPoint[];
   color: string;
   width: number;
+  refined?: boolean;
 };
 
 type CanvasSize = {
@@ -102,7 +103,7 @@ In SOLVE_PROBLEM mode, read the image or typed math problem, solve it step by st
 
 In CHECK_WHITEBOARD_WORK mode, compare the user's whiteboard work against the original problem and expected solution. Identify the first incorrect or unsupported step, explain the issue, provide a corrected step, and return JSON only.
 
-In CLEAN_INK mode, behave like Smart Script: interpret rough handwritten math strokes from point paths and rewrite them as legible editable math text. Return JSON only with this shape:
+In CLEAN_INK mode, interpret rough handwritten math strokes from point paths and rewrite them as legible editable math text. Return JSON only with this shape:
 {"items":[{"text":"legible math text","x":20,"y":120}]}
 
 Return valid JSON only. Do not wrap JSON in markdown.`;
@@ -204,6 +205,81 @@ function strokeToPath(stroke: InkStroke, viewport: Viewport) {
   }, `M ${startX} ${startY}`);
 }
 
+function distanceBetween(a: InkPoint, b: InkPoint) {
+  return Math.hypot(a.x - b.x, a.y - b.y);
+}
+
+function simplifyPoints(points: InkPoint[], minDistance = 4) {
+  if (points.length <= 2) return points;
+  const simplified = [points[0]];
+  for (const point of points.slice(1)) {
+    if (distanceBetween(point, simplified[simplified.length - 1]) >= minDistance) {
+      simplified.push(point);
+    }
+  }
+  return simplified.length > 1 ? simplified : points;
+}
+
+function smoothPoints(points: InkPoint[]) {
+  if (points.length <= 3) return points;
+  return points.map((point, index) => {
+    if (index === 0 || index === points.length - 1) return point;
+    const previous = points[index - 1];
+    const next = points[index + 1];
+    return {
+      x: previous.x * 0.25 + point.x * 0.5 + next.x * 0.25,
+      y: previous.y * 0.25 + point.y * 0.5 + next.y * 0.25
+    };
+  });
+}
+
+function straightenIfTextLine(points: InkPoint[]) {
+  if (points.length < 8) return points;
+  const first = points[0];
+  const last = points[points.length - 1];
+  const width = Math.abs(last.x - first.x);
+  const height = Math.max(...points.map((point) => point.y)) - Math.min(...points.map((point) => point.y));
+  if (width < 36 || height > width * 0.38) return points;
+  const startY = first.y;
+  const endY = last.y;
+  return points.map((point, index) => {
+    const progress = index / Math.max(1, points.length - 1);
+    const baselineY = startY + (endY - startY) * progress;
+    return {
+      x: point.x,
+      y: baselineY + (point.y - baselineY) * 0.62
+    };
+  });
+}
+
+function refineStroke(stroke: InkStroke): InkStroke {
+  const simplified = simplifyPoints(stroke.points);
+  const smoothed = smoothPoints(simplified);
+  return {
+    ...stroke,
+    points: straightenIfTextLine(smoothed),
+    refined: true
+  };
+}
+
+function scribbleLikelyErase(stroke: InkStroke) {
+  if (stroke.points.length < 14) return false;
+  const xs = stroke.points.map((point) => point.x);
+  const ys = stroke.points.map((point) => point.y);
+  const width = Math.max(...xs) - Math.min(...xs);
+  const height = Math.max(...ys) - Math.min(...ys);
+  let directionChanges = 0;
+  let previousDirection = 0;
+  for (let index = 1; index < stroke.points.length; index += 1) {
+    const direction = Math.sign(stroke.points[index].x - stroke.points[index - 1].x);
+    if (direction && previousDirection && direction !== previousDirection) {
+      directionChanges += 1;
+    }
+    if (direction) previousDirection = direction;
+  }
+  return width > 28 && height < 44 && directionChanges >= 4;
+}
+
 class StartupErrorBoundary extends Component<{ children: ReactNode }, { error?: Error }> {
   state: { error?: Error } = {};
 
@@ -251,6 +327,7 @@ function MathScapeApp() {
   const [hydrated, setHydrated] = useState(false);
   const joystick = useRef({ dx: 0, dy: 0, active: false });
   const activeStrokeId = useRef<string | null>(null);
+  const activeStrokePoints = useRef<InkPoint[]>([]);
   const smartScriptTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
@@ -567,10 +644,9 @@ function MathScapeApp() {
     ]);
   };
 
-  const runSmartScript = async () => {
-    setLastAction('smartScript');
+  const recognizeInkAsText = async () => {
     if (!apiKey.trim()) {
-      setErrorMessage('Open Settings and add your NVIDIA API key before using Smart Script.');
+      setErrorMessage('Open Settings and add your NVIDIA API key before recognizing handwriting as text.');
       return;
     }
     if (!inkStrokes.length) {
@@ -613,7 +689,7 @@ function MathScapeApp() {
         }))
       ]);
       setInkStrokes([]);
-      setFeedback('Smart Script converted handwriting into editable text cards.');
+      setFeedback('Recognized handwriting into editable text cards.');
     } catch (error) {
       setErrorMessage(friendlyError(error));
     } finally {
@@ -621,13 +697,28 @@ function MathScapeApp() {
     }
   };
 
-  const scheduleSmartScript = () => {
+  const refineInk = useCallback((strokeIds?: string[]) => {
+    pushUndo();
+    setInkStrokes((current) =>
+      current.map((stroke) =>
+        !strokeIds || strokeIds.includes(stroke.id) ? refineStroke(stroke) : stroke
+      )
+    );
+    setFeedback('Smart Script refined your handwriting while keeping it as ink.');
+  }, [pushUndo]);
+
+  const runSmartScript = useCallback((strokeId?: string) => {
+    setLastAction('smartScript');
+    refineInk(strokeId ? [strokeId] : undefined);
+  }, [refineInk]);
+
+  const scheduleSmartScript = (strokeId: string) => {
     if (!smartScriptEnabled) return;
     if (smartScriptTimer.current) {
       clearTimeout(smartScriptTimer.current);
     }
     smartScriptTimer.current = setTimeout(() => {
-      runSmartScript();
+      runSmartScript(strokeId);
     }, 1300);
   };
 
@@ -658,6 +749,7 @@ function MathScapeApp() {
           }
           const id = `ink_${Date.now()}`;
           activeStrokeId.current = id;
+          activeStrokePoints.current = [point];
           setInkStrokes((current) => [
             ...current,
             { id, points: [point], color: '#17201b', width: 4 }
@@ -674,6 +766,7 @@ function MathScapeApp() {
             return;
           }
           if (!activeStrokeId.current) return;
+          activeStrokePoints.current = [...activeStrokePoints.current, point];
           setInkStrokes((current) =>
             current.map((stroke) =>
               stroke.id === activeStrokeId.current
@@ -683,10 +776,20 @@ function MathScapeApp() {
           );
         },
         onPanResponderRelease: () => {
+          const completedStrokeId = activeStrokeId.current;
+          const completedStroke = completedStrokeId
+            ? { id: completedStrokeId, points: activeStrokePoints.current, color: '#17201b', width: 4 }
+            : undefined;
           if (drawingTool === 'pen') {
-            scheduleSmartScript();
+            if (completedStroke && scribbleLikelyErase(completedStroke)) {
+              setInkStrokes((current) => current.filter((stroke) => stroke.id !== completedStrokeId));
+              eraseAtPoint(completedStroke.points[Math.floor(completedStroke.points.length / 2)]);
+            } else if (completedStrokeId) {
+              scheduleSmartScript(completedStrokeId);
+            }
           }
           activeStrokeId.current = null;
+          activeStrokePoints.current = [];
         }
       }),
     [drawMode, drawingTool, pushUndo, smartScriptEnabled, viewport.offsetX, viewport.offsetY, viewport.zoom]
@@ -784,7 +887,7 @@ function MathScapeApp() {
             style={[styles.toolChip, smartScriptEnabled && styles.toolChipActive]}
           >
             <Text style={[styles.toolChipText, smartScriptEnabled && styles.toolChipTextActive]}>
-              Smart Script
+              Auto-refine
             </Text>
           </Pressable>
           <Text style={styles.boardHint}>{drawMode ? `${drawingTool === 'eraser' ? 'Erase ink' : 'Write with finger'}. Joystick moves the board.` : 'Joystick moves the board. Turn drawing on to write.'}</Text>
@@ -795,6 +898,8 @@ function MathScapeApp() {
             <Tool label="Add Text" onPress={() => { addText(); setMenuOpen(false); }} />
             <Tool label="Undo" onPress={undoBoard} />
             <Tool label="Redo" onPress={redoBoard} />
+            <Tool label="Refine Ink" onPress={() => { runSmartScript(); setMenuOpen(false); }} />
+            <Tool label="Recognize Text" onPress={() => { recognizeInkAsText(); setMenuOpen(false); }} />
             <Tool label="Check Work" onPress={() => { checkWork(); setMenuOpen(false); }} />
             <Tool label="Reset Board" onPress={() => { resetBoard(); setMenuOpen(false); }} />
             <Tool label="New Problem" onPress={() => { newProblem(); setMenuOpen(false); }} />
