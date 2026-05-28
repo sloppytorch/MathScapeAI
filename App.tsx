@@ -209,7 +209,7 @@ function distanceBetween(a: InkPoint, b: InkPoint) {
   return Math.hypot(a.x - b.x, a.y - b.y);
 }
 
-function simplifyPoints(points: InkPoint[], minDistance = 4) {
+function simplifyPoints(points: InkPoint[], minDistance = 7) {
   if (points.length <= 2) return points;
   const simplified = [points[0]];
   for (const point of points.slice(1)) {
@@ -222,24 +222,47 @@ function simplifyPoints(points: InkPoint[], minDistance = 4) {
 
 function smoothPoints(points: InkPoint[]) {
   if (points.length <= 3) return points;
-  return points.map((point, index) => {
-    if (index === 0 || index === points.length - 1) return point;
-    const previous = points[index - 1];
-    const next = points[index + 1];
-    return {
-      x: previous.x * 0.25 + point.x * 0.5 + next.x * 0.25,
-      y: previous.y * 0.25 + point.y * 0.5 + next.y * 0.25
-    };
-  });
+  let smoothed = points;
+  for (let pass = 0; pass < 3; pass += 1) {
+    smoothed = smoothed.map((point, index) => {
+      if (index === 0 || index === smoothed.length - 1) return point;
+      const previous = smoothed[index - 1];
+      const next = smoothed[index + 1];
+      return {
+        x: previous.x * 0.34 + point.x * 0.32 + next.x * 0.34,
+        y: previous.y * 0.34 + point.y * 0.32 + next.y * 0.34
+      };
+    });
+  }
+  return smoothed;
+}
+
+function normalizeStrokeScale(points: InkPoint[]) {
+  if (points.length < 2) return points;
+  const xs = points.map((point) => point.x);
+  const ys = points.map((point) => point.y);
+  const minX = Math.min(...xs);
+  const maxX = Math.max(...xs);
+  const minY = Math.min(...ys);
+  const maxY = Math.max(...ys);
+  const height = Math.max(1, maxY - minY);
+  if (height < 18) return points;
+  const targetHeight = Math.min(58, Math.max(32, height * 0.86));
+  const centerY = (minY + maxY) / 2;
+  const scaleY = targetHeight / height;
+  return points.map((point) => ({
+    x: minX + Math.round((point.x - minX) / 2) * 2,
+    y: centerY + (point.y - centerY) * scaleY
+  }));
 }
 
 function straightenIfTextLine(points: InkPoint[]) {
-  if (points.length < 8) return points;
+  if (points.length < 4) return points;
   const first = points[0];
   const last = points[points.length - 1];
   const width = Math.abs(last.x - first.x);
   const height = Math.max(...points.map((point) => point.y)) - Math.min(...points.map((point) => point.y));
-  if (width < 36 || height > width * 0.38) return points;
+  if (width < 16 || height > Math.max(70, width * 1.15)) return points;
   const startY = first.y;
   const endY = last.y;
   return points.map((point, index) => {
@@ -247,7 +270,7 @@ function straightenIfTextLine(points: InkPoint[]) {
     const baselineY = startY + (endY - startY) * progress;
     return {
       x: point.x,
-      y: baselineY + (point.y - baselineY) * 0.62
+      y: baselineY + (point.y - baselineY) * 0.38
     };
   });
 }
@@ -255,9 +278,11 @@ function straightenIfTextLine(points: InkPoint[]) {
 function refineStroke(stroke: InkStroke): InkStroke {
   const simplified = simplifyPoints(stroke.points);
   const smoothed = smoothPoints(simplified);
+  const normalized = normalizeStrokeScale(smoothed);
   return {
     ...stroke,
-    points: straightenIfTextLine(smoothed),
+    width: 3.2,
+    points: straightenIfTextLine(normalized),
     refined: true
   };
 }
@@ -410,7 +435,6 @@ function MathScapeApp() {
       setFeedback(previous.feedback);
       return current.slice(0, -1);
     });
-    setMenuOpen(false);
   };
 
   const redoBoard = () => {
@@ -423,7 +447,6 @@ function MathScapeApp() {
       setFeedback(next.feedback);
       return current.slice(0, -1);
     });
-    setMenuOpen(false);
   };
 
   const saveApiKey = async () => {
@@ -447,7 +470,6 @@ function MathScapeApp() {
     setFeedback('');
     setViewport(EMPTY_VIEWPORT);
     setErrorMessage('');
-    setMenuOpen(false);
   };
 
   const newProblem = async () => {
@@ -463,7 +485,6 @@ function MathScapeApp() {
     setSmartScriptEnabled(false);
     setUndoStack([]);
     setRedoStack([]);
-    setMenuOpen(false);
     setErrorMessage('');
     setMode('home');
     await AsyncStorage.removeItem(APP_STATE_STORAGE);
@@ -895,16 +916,15 @@ function MathScapeApp() {
 
         {menuOpen ? (
           <View style={styles.menuPanel}>
-            <Tool label="Add Text" onPress={() => { addText(); setMenuOpen(false); }} />
+            <Tool label="Add Text" onPress={addText} />
             <Tool label="Undo" onPress={undoBoard} />
             <Tool label="Redo" onPress={redoBoard} />
-            <Tool label="Refine Ink" onPress={() => { runSmartScript(); setMenuOpen(false); }} />
-            <Tool label="Recognize Text" onPress={() => { recognizeInkAsText(); setMenuOpen(false); }} />
-            <Tool label="Check Work" onPress={() => { checkWork(); setMenuOpen(false); }} />
-            <Tool label="Reset Board" onPress={() => { resetBoard(); setMenuOpen(false); }} />
-            <Tool label="New Problem" onPress={() => { newProblem(); setMenuOpen(false); }} />
-            <Tool label="Settings" onPress={() => { setMode('settings'); setMenuOpen(false); }} />
-            <Tool label="Center" onPress={() => { setViewport(EMPTY_VIEWPORT); setMenuOpen(false); }} />
+            <Tool label="Recognize Text" onPress={recognizeInkAsText} />
+            <Tool label="Check Work" onPress={checkWork} />
+            <Tool label="Reset Board" onPress={resetBoard} />
+            <Tool label="New Problem" onPress={newProblem} />
+            <Tool label="Settings" onPress={() => setMode('settings')} />
+            <Tool label="Center" onPress={() => setViewport(EMPTY_VIEWPORT)} />
             <Tool label="Zoom +" onPress={() => setViewport((v) => ({ ...v, zoom: Math.min(1.8, v.zoom + 0.1) }))} />
             <Tool label="Zoom -" onPress={() => setViewport((v) => ({ ...v, zoom: Math.max(0.6, v.zoom - 0.1) }))} />
           </View>
