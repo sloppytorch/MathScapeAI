@@ -5,6 +5,7 @@ import {
   ActivityIndicator,
   Alert,
   Image,
+  LayoutChangeEvent,
   PanResponder,
   Pressable,
   SafeAreaView,
@@ -15,9 +16,10 @@ import {
   TextInput,
   View
 } from 'react-native';
+import Svg, { Path } from 'react-native-svg';
 
 type Mode = 'home' | 'board' | 'settings';
-type LastAction = 'solve' | 'check' | null;
+type LastAction = 'solve' | 'check' | 'cleanInk' | null;
 
 type MathStep = {
   id: string;
@@ -52,11 +54,29 @@ type WhiteboardObject = {
   metadata?: Record<string, unknown>;
 };
 
+type InkPoint = {
+  x: number;
+  y: number;
+};
+
+type InkStroke = {
+  id: string;
+  points: InkPoint[];
+  color: string;
+  width: number;
+};
+
+type CanvasSize = {
+  width: number;
+  height: number;
+};
+
 type PersistedState = {
   typedProblem: string;
   imageUri?: string;
   solution: MathSolution;
   objects: WhiteboardObject[];
+  inkStrokes: InkStroke[];
   feedback: string;
 };
 
@@ -68,11 +88,15 @@ const EMPTY_VIEWPORT: Viewport = { offsetX: 0, offsetY: 0, zoom: 1 };
 
 const SYSTEM_PROMPT = `You are MathScape AI, an expert math tutor and visual reasoning assistant.
 
-You have two modes: SOLVE_PROBLEM and CHECK_WHITEBOARD_WORK.
+You have three modes: SOLVE_PROBLEM, CHECK_WHITEBOARD_WORK, and CLEAN_INK.
 
-In SOLVE_PROBLEM mode, read the image or typed math problem, solve it step by step, explain it clearly, list common mistakes, and return JSON only.
+In SOLVE_PROBLEM mode, read the image or typed math problem, solve it step by step, explain it clearly, list common mistakes, and return JSON only with this exact shape:
+{"problemStatement":"...","finalAnswer":"...","steps":[{"id":"step_1","title":"Step 1","math":"...","explanation":"..."}],"conceptExplanation":"...","commonMistakes":["..."]}
 
 In CHECK_WHITEBOARD_WORK mode, compare the user's whiteboard work against the original problem and expected solution. Identify the first incorrect or unsupported step, explain the issue, provide a corrected step, and return JSON only.
+
+In CLEAN_INK mode, interpret rough handwritten math strokes from point paths. Return JSON only with this shape:
+{"items":[{"text":"legible math text","x":20,"y":120}]}
 
 Return valid JSON only. Do not wrap JSON in markdown.`;
 
@@ -98,6 +122,25 @@ function extractJson(text: string) {
   }
 }
 
+function solutionFromLooseText(text: string, typedProblem: string): MathSolution {
+  const cleaned = text.trim();
+  const answerMatch = cleaned.match(/(?:final answer|answer)\s*:?\s*([^\n]+)/i);
+  return {
+    problemStatement: typedProblem || 'Problem from image',
+    finalAnswer: answerMatch?.[1]?.trim() || cleaned.split('\n').find(Boolean)?.trim() || 'Answer generated',
+    steps: [
+      {
+        id: 'step_1',
+        title: 'Solution',
+        math: answerMatch?.[1]?.trim() || '',
+        explanation: cleaned || 'The AI returned a solution, but not in the expected JSON format.'
+      }
+    ],
+    conceptExplanation: 'This answer was recovered from a non-JSON AI response.',
+    commonMistakes: []
+  };
+}
+
 function friendlyError(error: unknown) {
   if (error instanceof Error) {
     if (error.message.includes('401') || error.message.includes('403')) {
@@ -115,20 +158,43 @@ function friendlyError(error: unknown) {
 }
 
 function normalizeSolution(parsed: any, typedProblem: string): MathSolution {
+  const steps = Array.isArray(parsed.steps)
+    ? parsed.steps.map((step: any, index: number) => ({
+        id: String(step.id ?? `step_${index + 1}`),
+        title: String(step.title ?? `Step ${index + 1}`),
+        math: String(step.math ?? ''),
+        explanation: String(step.explanation ?? '')
+      }))
+    : [];
+  const finalAnswer = String(parsed.finalAnswer ?? parsed.answer ?? '');
   return {
     problemStatement: String(parsed.problemStatement ?? typedProblem ?? ''),
-    finalAnswer: String(parsed.finalAnswer ?? ''),
-    steps: Array.isArray(parsed.steps)
-      ? parsed.steps.map((step: any, index: number) => ({
-          id: String(step.id ?? `step_${index + 1}`),
-          title: String(step.title ?? `Step ${index + 1}`),
-          math: String(step.math ?? ''),
-          explanation: String(step.explanation ?? '')
-        }))
-      : [],
+    finalAnswer,
+    steps: steps.length
+      ? steps
+      : [
+          {
+            id: 'step_1',
+            title: 'Answer',
+            math: finalAnswer,
+            explanation: String(parsed.explanation ?? parsed.conceptExplanation ?? 'The AI returned an answer without separate steps.')
+          }
+        ],
     conceptExplanation: String(parsed.conceptExplanation ?? ''),
     commonMistakes: Array.isArray(parsed.commonMistakes) ? parsed.commonMistakes.map(String) : []
   };
+}
+
+function strokeToPath(stroke: InkStroke, viewport: Viewport) {
+  if (!stroke.points.length) return '';
+  const [first, ...rest] = stroke.points;
+  const startX = (first.x + viewport.offsetX) * viewport.zoom;
+  const startY = (first.y + viewport.offsetY) * viewport.zoom;
+  return rest.reduce((path, point) => {
+    const x = (point.x + viewport.offsetX) * viewport.zoom;
+    const y = (point.y + viewport.offsetY) * viewport.zoom;
+    return `${path} L ${x} ${y}`;
+  }, `M ${startX} ${startY}`);
 }
 
 class StartupErrorBoundary extends Component<{ children: ReactNode }, { error?: Error }> {
@@ -162,13 +228,18 @@ function MathScapeApp() {
   const [imageUri, setImageUri] = useState<string | undefined>();
   const [solution, setSolution] = useState<MathSolution>(fallbackSolution);
   const [objects, setObjects] = useState<WhiteboardObject[]>([]);
+  const [inkStrokes, setInkStrokes] = useState<InkStroke[]>([]);
   const [viewport, setViewport] = useState<Viewport>(EMPTY_VIEWPORT);
+  const [canvasSize, setCanvasSize] = useState<CanvasSize>({ width: 1, height: 1 });
+  const [drawMode, setDrawMode] = useState(false);
+  const [menuOpen, setMenuOpen] = useState(false);
   const [busy, setBusy] = useState(false);
   const [feedback, setFeedback] = useState('');
   const [errorMessage, setErrorMessage] = useState('');
   const [lastAction, setLastAction] = useState<LastAction>(null);
   const [hydrated, setHydrated] = useState(false);
   const joystick = useRef({ dx: 0, dy: 0, active: false });
+  const activeStrokeId = useRef<string | null>(null);
 
   useEffect(() => {
     async function hydrate() {
@@ -184,6 +255,7 @@ function MathScapeApp() {
           setImageUri(parsed.imageUri);
           setSolution(parsed.solution ?? fallbackSolution);
           setObjects(Array.isArray(parsed.objects) ? parsed.objects : []);
+          setInkStrokes(Array.isArray(parsed.inkStrokes) ? parsed.inkStrokes : []);
           setFeedback(parsed.feedback ?? '');
         }
       } catch {
@@ -197,11 +269,11 @@ function MathScapeApp() {
 
   useEffect(() => {
     if (!hydrated) return;
-    const state: PersistedState = { typedProblem, imageUri, solution, objects, feedback };
+    const state: PersistedState = { typedProblem, imageUri, solution, objects, inkStrokes, feedback };
     AsyncStorage.setItem(APP_STATE_STORAGE, JSON.stringify(state)).catch(() => {
       setErrorMessage('Could not save your latest work on this device.');
     });
-  }, [feedback, hydrated, imageUri, objects, solution, typedProblem]);
+  }, [feedback, hydrated, imageUri, inkStrokes, objects, solution, typedProblem]);
 
   useEffect(() => {
     let frame = 0;
@@ -235,9 +307,11 @@ function MathScapeApp() {
 
   const resetBoard = () => {
     setObjects(buildSolutionObjects(solution, imageUri));
+    setInkStrokes([]);
     setFeedback('');
     setViewport(EMPTY_VIEWPORT);
     setErrorMessage('');
+    setMenuOpen(false);
   };
 
   const newProblem = async () => {
@@ -245,8 +319,11 @@ function MathScapeApp() {
     setImageUri(undefined);
     setSolution(fallbackSolution);
     setObjects([]);
+    setInkStrokes([]);
     setFeedback('');
     setViewport(EMPTY_VIEWPORT);
+    setDrawMode(false);
+    setMenuOpen(false);
     setErrorMessage('');
     setMode('home');
     await AsyncStorage.removeItem(APP_STATE_STORAGE);
@@ -324,13 +401,20 @@ function MathScapeApp() {
           { role: 'system', content: SYSTEM_PROMPT },
           { role: 'user', content }
         ],
+        response_format: { type: 'json_object' },
         temperature: 0.2,
         max_tokens: 2048
       });
-      const parsed = extractJson(data.choices?.[0]?.message?.content ?? '');
-      const nextSolution = normalizeSolution(parsed, typedProblem);
+      const rawContent = data.choices?.[0]?.message?.content ?? '';
+      let nextSolution: MathSolution;
+      try {
+        nextSolution = normalizeSolution(extractJson(rawContent), typedProblem);
+      } catch {
+        nextSolution = solutionFromLooseText(rawContent, typedProblem);
+      }
       setSolution(nextSolution);
       setObjects(buildSolutionObjects(nextSolution, imageUri));
+      setInkStrokes([]);
       setViewport(EMPTY_VIEWPORT);
       setMode('board');
     } catch (error) {
@@ -360,9 +444,10 @@ function MathScapeApp() {
           { role: 'system', content: SYSTEM_PROMPT },
           {
             role: 'user',
-            content: `Mode: CHECK_WHITEBOARD_WORK. Return JSON only. Original problem: ${solution.problemStatement}. Expected solution: ${JSON.stringify(solution)}. Whiteboard objects: ${JSON.stringify(objects)}`
+            content: `Mode: CHECK_WHITEBOARD_WORK. Return JSON only. Original problem: ${solution.problemStatement}. Expected solution: ${JSON.stringify(solution)}. Whiteboard objects: ${JSON.stringify(objects)}. Ink strokes: ${JSON.stringify(inkStrokes)}`
           }
         ],
+        response_format: { type: 'json_object' },
         temperature: 0.1,
         max_tokens: 1600
       });
@@ -394,6 +479,8 @@ function MathScapeApp() {
   const retryLastAction = () => {
     if (lastAction === 'check') {
       checkWork();
+    } else if (lastAction === 'cleanInk') {
+      cleanInk();
     } else {
       solveProblem();
     }
@@ -414,20 +501,105 @@ function MathScapeApp() {
     ]);
   };
 
-  const panResponder = useMemo(
+  const cleanInk = async () => {
+    setLastAction('cleanInk');
+    if (!apiKey.trim()) {
+      setErrorMessage('Open Settings and add your NVIDIA API key before cleaning handwriting.');
+      return;
+    }
+    if (!inkStrokes.length) {
+      setErrorMessage('Draw something on the board first, then use Clean Ink.');
+      return;
+    }
+
+    setBusy(true);
+    setErrorMessage('');
+    try {
+      const data = await callNvidia({
+        model: NIM_MODEL,
+        messages: [
+          { role: 'system', content: SYSTEM_PROMPT },
+          {
+            role: 'user',
+            content: `Mode: CLEAN_INK. Interpret these whiteboard strokes as math handwriting. Return JSON only. Problem context: ${solution.problemStatement}. Strokes: ${JSON.stringify(inkStrokes)}`
+          }
+        ],
+        response_format: { type: 'json_object' },
+        temperature: 0.1,
+        max_tokens: 900
+      });
+      const parsed = extractJson(data.choices?.[0]?.message?.content ?? '');
+      const items = Array.isArray(parsed.items) ? parsed.items : [];
+      if (!items.length) {
+        throw new Error('No legible handwriting was recognized. Try writing larger or with fewer connected symbols.');
+      }
+      setObjects((current) => [
+        ...current,
+        ...items.map((item: any, index: number) => ({
+          id: `clean_${Date.now()}_${index}`,
+          type: 'text' as const,
+          x: Number(item.x ?? 40),
+          y: Number(item.y ?? 120 + index * 90),
+          width: Number(item.width ?? 280),
+          height: Number(item.height ?? 86),
+          content: String(item.text ?? item.content ?? '')
+        }))
+      ]);
+      setFeedback('Cleaned handwriting into editable text cards.');
+    } catch (error) {
+      setErrorMessage(friendlyError(error));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const canvasResponder = useMemo(
     () =>
       PanResponder.create({
-        onMoveShouldSetPanResponder: (_, gesture) => Math.abs(gesture.dx) > 5 || Math.abs(gesture.dy) > 5,
-        onPanResponderMove: (_, gesture) => {
-          setViewport((current) => ({
+        onStartShouldSetPanResponder: () => drawMode,
+        onMoveShouldSetPanResponder: () => drawMode,
+        onPanResponderGrant: (event) => {
+          if (!drawMode) return;
+          const point = {
+            x: event.nativeEvent.locationX / viewport.zoom - viewport.offsetX,
+            y: event.nativeEvent.locationY / viewport.zoom - viewport.offsetY
+          };
+          const id = `ink_${Date.now()}`;
+          activeStrokeId.current = id;
+          setInkStrokes((current) => [
             ...current,
-            offsetX: current.offsetX + gesture.vx * 4,
-            offsetY: current.offsetY + gesture.vy * 4
-          }));
+            { id, points: [point], color: '#17201b', width: 4 }
+          ]);
+        },
+        onPanResponderMove: (event) => {
+          if (!drawMode || !activeStrokeId.current) return;
+          const point = {
+            x: event.nativeEvent.locationX / viewport.zoom - viewport.offsetX,
+            y: event.nativeEvent.locationY / viewport.zoom - viewport.offsetY
+          };
+          setInkStrokes((current) =>
+            current.map((stroke) =>
+              stroke.id === activeStrokeId.current
+                ? { ...stroke, points: [...stroke.points, point] }
+                : stroke
+            )
+          );
+        },
+        onPanResponderRelease: () => {
+          activeStrokeId.current = null;
         }
       }),
-    []
+    [drawMode, viewport.offsetX, viewport.offsetY, viewport.zoom]
   );
+
+  const handleCanvasLayout = (event: LayoutChangeEvent) => {
+    const { width, height } = event.nativeEvent.layout;
+    setCanvasSize({ width, height });
+  };
+
+  const activeQuestion = solution.problemStatement && solution.problemStatement !== fallbackSolution.problemStatement
+    ? solution.problemStatement
+    : typedProblem || 'No problem loaded yet. Solve a problem or add your own work.';
 
   const moveObject = useCallback((id: string, dx: number, dy: number) => {
     setObjects((current) =>
@@ -482,24 +654,58 @@ function MathScapeApp() {
         <View style={styles.boardHeader}>
           <Pressable onPress={() => setMode('home')} style={styles.iconButton}><Text style={styles.iconText}>Home</Text></Pressable>
           <Text style={styles.boardTitle}>Whiteboard</Text>
-          <Pressable onPress={() => setMode('settings')} style={styles.iconButton}><Text style={styles.iconText}>Key</Text></Pressable>
+          <Pressable onPress={() => setMenuOpen((open) => !open)} style={styles.iconButton}><Text style={styles.iconText}>Menu</Text></Pressable>
         </View>
 
-        <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.toolbar}>
-          <Tool label="Text" onPress={addText} />
-          <Tool label="Check Work" onPress={checkWork} />
-          <Tool label="Reset Board" onPress={resetBoard} />
-          <Tool label="New Problem" onPress={newProblem} />
-          <Tool label="Center" onPress={() => setViewport(EMPTY_VIEWPORT)} />
-          <Tool label="+" onPress={() => setViewport((v) => ({ ...v, zoom: Math.min(1.8, v.zoom + 0.1) }))} />
-          <Tool label="-" onPress={() => setViewport((v) => ({ ...v, zoom: Math.max(0.6, v.zoom - 0.1) }))} />
-        </ScrollView>
+        <View style={styles.problemStrip}>
+          <Text style={styles.problemLabel}>Question</Text>
+          <Text style={styles.problemText} numberOfLines={2}>{activeQuestion}</Text>
+        </View>
+
+        <View style={styles.boardStatus}>
+          <Pressable
+            onPress={() => setDrawMode((enabled) => !enabled)}
+            style={[styles.drawToggle, drawMode && styles.drawToggleActive]}
+          >
+            <Text style={[styles.drawToggleText, drawMode && styles.drawToggleTextActive]}>
+              {drawMode ? 'Drawing On' : 'Drawing Off'}
+            </Text>
+          </Pressable>
+          <Text style={styles.boardHint}>{drawMode ? 'Finger draws. Joystick moves the board.' : 'Joystick moves the board. Turn drawing on to write.'}</Text>
+        </View>
+
+        {menuOpen ? (
+          <View style={styles.menuPanel}>
+            <Tool label="Add Text" onPress={() => { addText(); setMenuOpen(false); }} />
+            <Tool label="Clean Ink" onPress={() => { cleanInk(); setMenuOpen(false); }} />
+            <Tool label="Check Work" onPress={() => { checkWork(); setMenuOpen(false); }} />
+            <Tool label="Reset Board" onPress={() => { resetBoard(); setMenuOpen(false); }} />
+            <Tool label="New Problem" onPress={() => { newProblem(); setMenuOpen(false); }} />
+            <Tool label="Settings" onPress={() => { setMode('settings'); setMenuOpen(false); }} />
+            <Tool label="Center" onPress={() => { setViewport(EMPTY_VIEWPORT); setMenuOpen(false); }} />
+            <Tool label="Zoom +" onPress={() => setViewport((v) => ({ ...v, zoom: Math.min(1.8, v.zoom + 0.1) }))} />
+            <Tool label="Zoom -" onPress={() => setViewport((v) => ({ ...v, zoom: Math.max(0.6, v.zoom - 0.1) }))} />
+          </View>
+        ) : null}
 
         {errorMessage ? <ErrorBanner message={errorMessage} onRetry={retryLastAction} /> : null}
         {feedback ? <Text style={styles.feedback}>{feedback}</Text> : null}
 
-        <View style={styles.canvas} {...panResponder.panHandlers}>
+        <View style={styles.canvas} onLayout={handleCanvasLayout} {...canvasResponder.panHandlers}>
           <Grid viewport={viewport} />
+          <Svg width={canvasSize.width} height={canvasSize.height} style={styles.inkLayer}>
+            {inkStrokes.map((stroke) => (
+              <Path
+                key={stroke.id}
+                d={strokeToPath(stroke, viewport)}
+                stroke={stroke.color}
+                strokeWidth={stroke.width * viewport.zoom}
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                fill="none"
+              />
+            ))}
+          </Svg>
           {objects.map((object) => (
             <BoardObject
               key={object.id}
@@ -965,14 +1171,71 @@ const styles = StyleSheet.create({
     color: '#17201b',
     fontWeight: '800'
   },
-  toolbar: {
-    minHeight: 54,
-    paddingHorizontal: 8,
-    flexDirection: 'row',
-    gap: 8,
-    alignItems: 'center',
+  problemStrip: {
+    paddingHorizontal: 14,
+    paddingVertical: 10,
     borderBottomWidth: 1,
-    borderBottomColor: '#d8d0c0'
+    borderBottomColor: '#d8d0c0',
+    backgroundColor: '#fffaf0',
+    gap: 2
+  },
+  problemLabel: {
+    fontSize: 12,
+    fontWeight: '900',
+    color: '#0f6b5f',
+    textTransform: 'uppercase'
+  },
+  problemText: {
+    color: '#17201b',
+    fontWeight: '800',
+    lineHeight: 20
+  },
+  boardStatus: {
+    minHeight: 48,
+    paddingHorizontal: 10,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    borderBottomWidth: 1,
+    borderBottomColor: '#d8d0c0',
+    backgroundColor: '#fbf8ef'
+  },
+  boardHint: {
+    flex: 1,
+    color: '#51615a',
+    fontSize: 12,
+    fontWeight: '700'
+  },
+  drawToggle: {
+    minHeight: 34,
+    minWidth: 108,
+    paddingHorizontal: 10,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#0f6b5f',
+    backgroundColor: '#f7fffb'
+  },
+  drawToggleActive: {
+    backgroundColor: '#0f6b5f'
+  },
+  drawToggleText: {
+    color: '#0f6b5f',
+    fontSize: 12,
+    fontWeight: '900'
+  },
+  drawToggleTextActive: {
+    color: '#fff'
+  },
+  menuPanel: {
+    padding: 8,
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 8,
+    borderBottomWidth: 1,
+    borderBottomColor: '#d8d0c0',
+    backgroundColor: '#ece4d6'
   },
   tool: {
     minHeight: 36,
@@ -998,6 +1261,11 @@ const styles = StyleSheet.create({
     flex: 1,
     overflow: 'hidden',
     backgroundColor: '#fbf8ef'
+  },
+  inkLayer: {
+    position: 'absolute',
+    left: 0,
+    top: 0
   },
   gridLineV: {
     position: 'absolute',
