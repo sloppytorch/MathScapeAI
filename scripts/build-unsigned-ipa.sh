@@ -8,6 +8,23 @@ CONFIGURATION="${CONFIGURATION:-Release}"
 mkdir -p build
 exec > >(tee build/full-build.log) 2>&1
 
+run_with_heartbeat() {
+  local label="$1"
+  shift
+  (
+    while true; do
+      sleep 60
+      echo "Still running: ${label}..."
+    done
+  ) &
+  local heartbeat_pid=$!
+  "$@"
+  local status=$?
+  kill "$heartbeat_pid" >/dev/null 2>&1 || true
+  wait "$heartbeat_pid" 2>/dev/null || true
+  return "$status"
+}
+
 echo "Installing JavaScript dependencies..."
 npm ci
 
@@ -21,11 +38,11 @@ rm -rf "$HOME/Library/Developer/Xcode/DerivedData/MathScapeAI-"*
   rm -rf Pods Podfile.lock
   echo "Installing CocoaPods dependencies..."
   set +e
-  timeout 1200 pod install --verbose 2>&1 | tee ../build/pod-install.log
+  run_with_heartbeat "pod install" timeout 1800 pod install --verbose 2>&1 | tee ../build/pod-install.log
   POD_STATUS=${PIPESTATUS[0]}
   if [[ "$POD_STATUS" -ne 0 ]]; then
     echo "pod install failed with status ${POD_STATUS}. Retrying with --repo-update..."
-    timeout 1200 pod install --repo-update --verbose 2>&1 | tee -a ../build/pod-install.log
+    run_with_heartbeat "pod install --repo-update" timeout 1800 pod install --repo-update --verbose 2>&1 | tee -a ../build/pod-install.log
     POD_STATUS=${PIPESTATUS[0]}
   fi
   set -e
