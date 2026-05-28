@@ -38,11 +38,11 @@ rm -rf "$HOME/Library/Developer/Xcode/DerivedData/MathScapeAI-"*
   rm -rf Pods Podfile.lock
   echo "Installing CocoaPods dependencies..."
   set +e
-  run_with_heartbeat "pod install" timeout 1800 pod install --verbose 2>&1 | tee ../build/pod-install.log
+  run_with_heartbeat "pod install" pod install --verbose 2>&1 | tee ../build/pod-install.log
   POD_STATUS=${PIPESTATUS[0]}
   if [[ "$POD_STATUS" -ne 0 ]]; then
     echo "pod install failed with status ${POD_STATUS}. Retrying with --repo-update..."
-    run_with_heartbeat "pod install --repo-update" timeout 1800 pod install --repo-update --verbose 2>&1 | tee -a ../build/pod-install.log
+    run_with_heartbeat "pod install --repo-update" pod install --repo-update --verbose 2>&1 | tee -a ../build/pod-install.log
     POD_STATUS=${PIPESTATUS[0]}
   fi
   set -e
