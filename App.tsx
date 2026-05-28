@@ -195,14 +195,30 @@ function normalizeSolution(parsed: any, typedProblem: string): MathSolution {
 
 function strokeToPath(stroke: InkStroke, viewport: Viewport) {
   if (!stroke.points.length) return '';
+  if (stroke.points.length === 1) {
+    const point = stroke.points[0];
+    const x = (point.x + viewport.offsetX) * viewport.zoom;
+    const y = (point.y + viewport.offsetY) * viewport.zoom;
+    return `M ${x} ${y} L ${x + 0.1} ${y + 0.1}`;
+  }
+  if (stroke.points.length === 2) {
+    const [first, last] = stroke.points;
+    return `M ${(first.x + viewport.offsetX) * viewport.zoom} ${(first.y + viewport.offsetY) * viewport.zoom} L ${(last.x + viewport.offsetX) * viewport.zoom} ${(last.y + viewport.offsetY) * viewport.zoom}`;
+  }
   const [first, ...rest] = stroke.points;
   const startX = (first.x + viewport.offsetX) * viewport.zoom;
   const startY = (first.y + viewport.offsetY) * viewport.zoom;
-  return rest.reduce((path, point) => {
-    const x = (point.x + viewport.offsetX) * viewport.zoom;
-    const y = (point.y + viewport.offsetY) * viewport.zoom;
-    return `${path} L ${x} ${y}`;
-  }, `M ${startX} ${startY}`);
+  let path = `M ${startX} ${startY}`;
+  for (let index = 0; index < rest.length; index += 1) {
+    const previous = stroke.points[index];
+    const current = stroke.points[index + 1];
+    const controlX = ((previous.x + current.x) / 2 + viewport.offsetX) * viewport.zoom;
+    const controlY = ((previous.y + current.y) / 2 + viewport.offsetY) * viewport.zoom;
+    const x = (current.x + viewport.offsetX) * viewport.zoom;
+    const y = (current.y + viewport.offsetY) * viewport.zoom;
+    path += ` Q ${controlX} ${controlY} ${x} ${y}`;
+  }
+  return path;
 }
 
 function distanceBetween(a: InkPoint, b: InkPoint) {
@@ -218,6 +234,47 @@ function simplifyPoints(points: InkPoint[], minDistance = 7) {
     }
   }
   return simplified.length > 1 ? simplified : points;
+}
+
+function resamplePoints(points: InkPoint[], spacing = 6) {
+  if (points.length <= 2) return points;
+  const sampled = [points[0]];
+  let remaining = spacing;
+  for (let index = 1; index < points.length; index += 1) {
+    let previous = sampled[sampled.length - 1];
+    const target = points[index];
+    let distance = distanceBetween(previous, target);
+    while (distance >= remaining && distance > 0) {
+      const ratio = remaining / distance;
+      const nextPoint = {
+        x: previous.x + (target.x - previous.x) * ratio,
+        y: previous.y + (target.y - previous.y) * ratio
+      };
+      sampled.push(nextPoint);
+      previous = nextPoint;
+      distance = distanceBetween(previous, target);
+      remaining = spacing;
+    }
+    remaining -= distance;
+  }
+  const last = points[points.length - 1];
+  if (distanceBetween(sampled[sampled.length - 1], last) > 1) {
+    sampled.push(last);
+  }
+  return sampled;
+}
+
+function strokeBounds(stroke: InkStroke) {
+  const xs = stroke.points.map((point) => point.x);
+  const ys = stroke.points.map((point) => point.y);
+  return {
+    minX: Math.min(...xs),
+    maxX: Math.max(...xs),
+    minY: Math.min(...ys),
+    maxY: Math.max(...ys),
+    centerY: (Math.min(...ys) + Math.max(...ys)) / 2,
+    height: Math.max(...ys) - Math.min(...ys)
+  };
 }
 
 function smoothPoints(points: InkPoint[]) {
@@ -276,7 +333,8 @@ function straightenIfTextLine(points: InkPoint[]) {
 }
 
 function refineStroke(stroke: InkStroke): InkStroke {
-  const simplified = simplifyPoints(stroke.points);
+  const resampled = resamplePoints(stroke.points);
+  const simplified = simplifyPoints(resampled);
   const smoothed = smoothPoints(simplified);
   const normalized = normalizeStrokeScale(smoothed);
   return {
@@ -285,6 +343,44 @@ function refineStroke(stroke: InkStroke): InkStroke {
     points: straightenIfTextLine(normalized),
     refined: true
   };
+}
+
+function refineStrokesTogether(strokes: InkStroke[]) {
+  if (!strokes.length) return strokes;
+  const sorted = [...strokes].sort((a, b) => strokeBounds(a).centerY - strokeBounds(b).centerY);
+  const lines: InkStroke[][] = [];
+  for (const stroke of sorted) {
+    const bounds = strokeBounds(stroke);
+    const line = lines.find((candidate) => {
+      const centers = candidate.map((item) => strokeBounds(item).centerY);
+      const center = centers.reduce((sum, value) => sum + value, 0) / centers.length;
+      return Math.abs(center - bounds.centerY) < 42;
+    });
+    if (line) {
+      line.push(stroke);
+    } else {
+      lines.push([stroke]);
+    }
+  }
+
+  return strokes.map((stroke) => {
+    const refined = refineStroke(stroke);
+    const line = lines.find((candidate) => candidate.some((item) => item.id === stroke.id));
+    if (!line) return refined;
+    const lineBounds = line.map(strokeBounds);
+    const baseline = lineBounds.reduce((sum, bounds) => sum + bounds.centerY, 0) / lineBounds.length;
+    const averageHeight = lineBounds.reduce((sum, bounds) => sum + bounds.height, 0) / lineBounds.length;
+    const targetHeight = Math.min(56, Math.max(34, averageHeight || 40));
+    const refinedBounds = strokeBounds(refined);
+    const scaleY = refinedBounds.height > 1 ? targetHeight / refinedBounds.height : 1;
+    return {
+      ...refined,
+      points: refined.points.map((point) => ({
+        x: Math.round(point.x / 1.5) * 1.5,
+        y: baseline + (point.y - refinedBounds.centerY) * scaleY * 0.72
+      }))
+    };
+  });
 }
 
 function scribbleLikelyErase(stroke: InkStroke) {
@@ -721,9 +817,11 @@ function MathScapeApp() {
   const refineInk = useCallback((strokeIds?: string[]) => {
     pushUndo();
     setInkStrokes((current) =>
-      current.map((stroke) =>
-        !strokeIds || strokeIds.includes(stroke.id) ? refineStroke(stroke) : stroke
-      )
+      strokeIds
+        ? current.map((stroke) =>
+            strokeIds.includes(stroke.id) ? refineStrokesTogether([stroke])[0] : stroke
+          )
+        : refineStrokesTogether(current)
     );
     setFeedback('Smart Script refined your handwriting while keeping it as ink.');
   }, [pushUndo]);
@@ -910,6 +1008,12 @@ function MathScapeApp() {
             <Text style={[styles.toolChipText, smartScriptEnabled && styles.toolChipTextActive]}>
               Auto-refine
             </Text>
+          </Pressable>
+          <Pressable onPress={undoBoard} style={[styles.toolChip, !undoStack.length && styles.toolChipDisabled]}>
+            <Text style={[styles.toolChipText, !undoStack.length && styles.toolChipTextDisabled]}>Undo</Text>
+          </Pressable>
+          <Pressable onPress={redoBoard} style={[styles.toolChip, !redoStack.length && styles.toolChipDisabled]}>
+            <Text style={[styles.toolChipText, !redoStack.length && styles.toolChipTextDisabled]}>Redo</Text>
           </Pressable>
           <Text style={styles.boardHint}>{drawMode ? `${drawingTool === 'eraser' ? 'Erase ink' : 'Write with finger'}. Joystick moves the board.` : 'Joystick moves the board. Turn drawing on to write.'}</Text>
         </View>
@@ -1462,6 +1566,9 @@ const styles = StyleSheet.create({
     borderColor: '#0f6b5f',
     backgroundColor: '#0f6b5f'
   },
+  toolChipDisabled: {
+    opacity: 0.42
+  },
   toolChipText: {
     color: '#17201b',
     fontSize: 12,
@@ -1469,6 +1576,9 @@ const styles = StyleSheet.create({
   },
   toolChipTextActive: {
     color: '#fff'
+  },
+  toolChipTextDisabled: {
+    color: '#51615a'
   },
   drawToggle: {
     minHeight: 34,
